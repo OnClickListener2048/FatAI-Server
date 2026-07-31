@@ -50,12 +50,19 @@ class TokenResponse(BaseModel):
     token_type: Literal["bearer"] = "bearer"
 
 
+class DeviceBootstrapRequest(BaseModel):
+    device_id: str = Field(min_length=16, max_length=64, pattern=r"^[a-zA-Z0-9-]+$")
+    display_name: str = Field(default="FatAI device", min_length=1, max_length=120)
+
+
 class WorkspaceInput(BaseModel):
+    id: str | None = Field(default=None, min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=160)
     system_prompt: str = ""
 
 
 class ConversationInput(BaseModel):
+    id: str | None = Field(default=None, min_length=1, max_length=64)
     workspace_id: str
     title: str = "New conversation"
     provider_type: str = "OpenAI"
@@ -63,6 +70,7 @@ class ConversationInput(BaseModel):
 
 
 class MessageInput(BaseModel):
+    id: str | None = Field(default=None, min_length=1, max_length=64)
     role: Literal["user", "assistant", "system", "tool"]
     content: str = Field(min_length=1)
     reasoning_content: str = ""
@@ -70,6 +78,7 @@ class MessageInput(BaseModel):
 
 
 class MemoryInput(BaseModel):
+    id: str | None = Field(default=None, min_length=1, max_length=64)
     scope: Literal["GLOBAL", "WORKSPACE", "CONVERSATION"]
     content: str = Field(min_length=1)
     workspace_id: str | None = None
@@ -78,6 +87,7 @@ class MemoryInput(BaseModel):
 
 
 class PromptInput(BaseModel):
+    id: str | None = Field(default=None, min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=160)
     content: str = Field(min_length=1)
     workspace_id: str | None = None
@@ -127,6 +137,24 @@ async def login(payload: LoginRequest, session: Session) -> TokenResponse:
     return TokenResponse(access_token=create_access_token(user.id))
 
 
+@router.post("/auth/device", response_model=TokenResponse)
+async def bootstrap_device(payload: DeviceBootstrapRequest, session: Session) -> TokenResponse:
+    """Create or resume a device-local account during the offline-first client migration."""
+    user = await session.scalar(select(User).where(User.id == payload.device_id))
+    if user is None:
+        user = User(
+            id=payload.device_id,
+            email=f"{payload.device_id}@device.fatai.local",
+            display_name=payload.display_name.strip(),
+            password_hash=hash_password(payload.device_id),
+        )
+        session.add(user)
+        await session.flush()
+        session.add(Workspace(id=str(uuid.uuid4()), user_id=user.id, name="Inbox", system_prompt=""))
+        await session.commit()
+    return TokenResponse(access_token=create_access_token(user.id))
+
+
 @router.get("/users/me")
 async def me(user: CurrentUser) -> dict:
     return entity_payload(user)
@@ -140,7 +168,20 @@ async def list_workspaces(user: CurrentUser, session: Session) -> list[dict]:
 
 @router.post("/workspaces", status_code=status.HTTP_201_CREATED)
 async def create_workspace(payload: WorkspaceInput, user: CurrentUser, session: Session) -> dict:
-    workspace = Workspace(user_id=user.id, name=payload.name.strip(), system_prompt=payload.system_prompt.strip())
+    if payload.id:
+        existing = await session.scalar(select(Workspace).where(Workspace.id == payload.id, Workspace.user_id == user.id))
+        if existing is not None:
+            existing.name = payload.name.strip()
+            existing.system_prompt = payload.system_prompt.strip()
+            await session.commit()
+            return entity_payload(existing)
+    workspace = Workspace(
+        user_id=user.id,
+        name=payload.name.strip(),
+        system_prompt=payload.system_prompt.strip(),
+    )
+    if payload.id:
+        workspace.id = payload.id
     session.add(workspace)
     await session.commit()
     await session.refresh(workspace)
@@ -167,7 +208,7 @@ async def list_conversations(user: CurrentUser, session: Session, workspace_id: 
 @router.post("/conversations", status_code=status.HTTP_201_CREATED)
 async def create_conversation(payload: ConversationInput, user: CurrentUser, session: Session) -> dict:
     await owned_or_404(session, Workspace, payload.workspace_id, user.id)
-    record = Conversation(user_id=user.id, **payload.model_dump())
+    record = Conversation(user_id=user.id, **payload.model_dump(exclude_none=True))
     session.add(record)
     await session.commit()
     await session.refresh(record)
@@ -184,7 +225,7 @@ async def list_messages(conversation_id: str, user: CurrentUser, session: Sessio
 @router.post("/conversations/{conversation_id}/messages", status_code=status.HTTP_201_CREATED)
 async def create_message(conversation_id: str, payload: MessageInput, user: CurrentUser, session: Session) -> dict:
     await owned_or_404(session, Conversation, conversation_id, user.id)
-    record = Message(conversation_id=conversation_id, user_id=user.id, **payload.model_dump())
+    record = Message(conversation_id=conversation_id, user_id=user.id, **payload.model_dump(exclude_none=True))
     session.add(record)
     await session.commit()
     await session.refresh(record)
@@ -277,7 +318,7 @@ async def list_memories(user: CurrentUser, session: Session, workspace_id: str |
 
 @router.post("/memories", status_code=status.HTTP_201_CREATED)
 async def create_memory(payload: MemoryInput, user: CurrentUser, session: Session) -> dict:
-    record = MemoryEntry(user_id=user.id, **payload.model_dump())
+    record = MemoryEntry(user_id=user.id, **payload.model_dump(exclude_none=True))
     session.add(record)
     await session.commit()
     await session.refresh(record)
@@ -303,7 +344,7 @@ async def list_prompts(user: CurrentUser, session: Session, workspace_id: str | 
 
 @router.post("/prompt-templates", status_code=status.HTTP_201_CREATED)
 async def create_prompt(payload: PromptInput, user: CurrentUser, session: Session) -> dict:
-    record = PromptTemplate(user_id=user.id, **payload.model_dump())
+    record = PromptTemplate(user_id=user.id, **payload.model_dump(exclude_none=True))
     session.add(record)
     await session.commit()
     await session.refresh(record)
