@@ -1,0 +1,123 @@
+import uuid
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from app.core.config import get_settings
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class IdTimestampMixin:
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class User(IdTimestampMixin, Base):
+    __tablename__ = "users"
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(120))
+    password_hash: Mapped[str] = mapped_column(String(512))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class Workspace(IdTimestampMixin, Base):
+    __tablename__ = "workspaces"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    system_prompt: Mapped[str] = mapped_column(Text, default="")
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class Conversation(IdTimestampMixin, Base):
+    __tablename__ = "conversations"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
+    title: Mapped[str] = mapped_column(String(240), default="New conversation")
+    provider_type: Mapped[str] = mapped_column(String(64), default="OpenAI")
+    model: Mapped[str] = mapped_column(String(256))
+    is_pinned: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class Message(IdTimestampMixin, Base):
+    __tablename__ = "messages"
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    role: Mapped[str] = mapped_column(String(16))
+    content: Mapped[str] = mapped_column(Text)
+    reasoning_content: Mapped[str] = mapped_column(Text, default="")
+    content_type: Mapped[str] = mapped_column(String(32), default="Markdown")
+
+
+class MemoryEntry(IdTimestampMixin, Base):
+    __tablename__ = "memory_entries"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    workspace_id: Mapped[str | None] = mapped_column(ForeignKey("workspaces.id"), nullable=True, index=True)
+    conversation_id: Mapped[str | None] = mapped_column(ForeignKey("conversations.id"), nullable=True, index=True)
+    scope: Mapped[str] = mapped_column(String(32))
+    kind: Mapped[str] = mapped_column(String(32), default="FACT")
+    content: Mapped[str] = mapped_column(Text)
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class PromptTemplate(IdTimestampMixin, Base):
+    __tablename__ = "prompt_templates"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    workspace_id: Mapped[str | None] = mapped_column(ForeignKey("workspaces.id"), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    content: Mapped[str] = mapped_column(Text)
+    priority: Mapped[int] = mapped_column(Integer, default=100)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class FileAsset(IdTimestampMixin, Base):
+    __tablename__ = "file_assets"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    workspace_id: Mapped[str | None] = mapped_column(ForeignKey("workspaces.id"), nullable=True)
+    conversation_id: Mapped[str | None] = mapped_column(ForeignKey("conversations.id"), nullable=True, index=True)
+    message_id: Mapped[str | None] = mapped_column(ForeignKey("messages.id"), nullable=True)
+    display_name: Mapped[str] = mapped_column(String(512))
+    mime_type: Mapped[str] = mapped_column(String(160))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    storage_path: Mapped[str] = mapped_column(String(1024))
+    status: Mapped[str] = mapped_column(String(32), default="UPLOADED")
+
+
+class KnowledgeDocument(IdTimestampMixin, Base):
+    __tablename__ = "knowledge_documents"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    workspace_id: Mapped[str | None] = mapped_column(ForeignKey("workspaces.id"), nullable=True, index=True)
+    file_asset_id: Mapped[str] = mapped_column(ForeignKey("file_assets.id"), unique=True)
+    status: Mapped[str] = mapped_column(String(32), default="QUEUED")
+    extracted_markdown: Mapped[str] = mapped_column(Text, default="")
+
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+    __table_args__ = (UniqueConstraint("user_id", "key", name="uq_app_settings_user_key"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    key: Mapped[str] = mapped_column(String(120))
+    value: Mapped[str] = mapped_column(Text)
+
+
+engine = create_async_engine(get_settings().database_url, future=True)
+SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+
+async def initialize_database() -> None:
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+
+async def get_session():
+    async with SessionLocal() as session:
+        yield session

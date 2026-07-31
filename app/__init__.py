@@ -1,0 +1,1 @@
+"""FatAI FastAPI backend."""
