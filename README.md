@@ -65,3 +65,7 @@ curl.exe -X POST http://127.0.0.1:8080/v1/auth/register `
 核心 HTTP 路由位于 `app/api/`，业务和外部集成位于 `app/services/`，配置在 `app/core/config.py`，数据库模型与初始化逻辑在 `app/db.py`。运行生成的 `.env`、`data/`、`fat_ai.db` 不应提交。
 
 当前仓库尚未配置自动化测试或代码格式化命令。新增功能时请至少通过 `/docs` 或相应的 HTTP 请求验证，并为外部依赖（OpenAI、Docling、搜索）使用可控的测试替身。
+
+## 客户端迁移状态
+
+Compose 客户端已通过 SSE 使用服务端模型网关，并通过设备会话把工作区、会话、消息、记忆和提示词模板的新增写入镜像到本服务。客户端 SQLDelight 目前仍负责读取与离线缓存；服务端回拉、双向冲突处理、文件对象存储、异步 RAG 索引及完整的 LangGraph 工作流仍是后续工作。
