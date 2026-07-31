@@ -37,6 +37,25 @@ uv run python main.py
 | `UPLOAD_DIRECTORY` / `MAX_DOCUMENT_SIZE_BYTES` | 上传文件目录和大小上限（默认 50 MiB）。 |
 | `ALLOW_LOCAL_DOCUMENT_PATHS` | 仅为本地桌面端迁移保留 JSON `localPath` 读取；部署到远程环境前设为 `false`。 |
 
+## 依赖与职责
+
+以下为 `pyproject.toml` 中声明的直接依赖及其上游仓库（或官方源码项目）。其余由这些包带入的传递依赖以 `uv.lock` 为准。
+
+| 依赖仓库 | 本项目中的作用 |
+| --- | --- |
+| [FastAPI](https://github.com/fastapi/fastapi) | 提供 HTTP 路由、依赖注入、文件上传、CORS、中间件和 OpenAPI 文档。 |
+| [Uvicorn](https://github.com/Kludex/uvicorn) | 在 `main.py` 中运行 ASGI 应用并提供开发期热重载。 |
+| [HTTPX](https://github.com/encode/httpx) | 异步访问 DuckDuckGo、天气来源和 Docling 文档解析服务。 |
+| [Beautiful Soup](https://code.launchpad.net/beautifulsoup) | 解析搜索和天气页面的 HTML 内容。 |
+| [LangChain](https://github.com/langchain-ai/langchain) 与 [langchain-openai](https://github.com/langchain-ai/langchain/tree/master/libs/partners/openai) | 通过 OpenAI 兼容接口调用模型，并把输出转换为 SSE 聊天事件。 |
+| [LangGraph](https://github.com/langchain-ai/langgraph) | 实现 `/v1/agents/run` 的基础状态图 Agent 节点。 |
+| [Pydantic Settings](https://github.com/pydantic/pydantic-settings) | 从环境变量和 `.env` 加载、校验运行配置；Pydantic 模型由 FastAPI 的依赖链提供。 |
+| [email-validator](https://github.com/JoshData/python-email-validator) | 校验注册与登录请求中的邮箱地址。 |
+| [pwdlib](https://github.com/frankie567/pwdlib) 与 [PyJWT](https://github.com/jpadilla/pyjwt) | 分别处理密码哈希和 JWT 的签发、验证。 |
+| [python-multipart](https://github.com/Kludex/python-multipart) | 支持文档读取和文件上传接口的 `multipart/form-data` 请求。 |
+| [SQLAlchemy](https://github.com/sqlalchemy/sqlalchemy) | 定义用户、会话、消息、文件等模型，并提供异步数据库会话。 |
+| [aiosqlite](https://github.com/omnilib/aiosqlite) 与 [asyncpg](https://github.com/MagicStack/asyncpg) | 分别作为默认 SQLite 和可选 PostgreSQL 的 SQLAlchemy 异步驱动。 |
+
 ## API 概览
 
 除认证和健康检查外，领域接口都需要 `Authorization: Bearer <token>`。先创建账号：
