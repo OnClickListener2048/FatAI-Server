@@ -1,0 +1,102 @@
+# FatAI Server API
+
+Base URL: `http://127.0.0.1:8080` by default. The interactive OpenAPI specification is available
+at `/docs`, and the machine-readable specification is `/openapi.json`.
+
+Unless marked otherwise, domain APIs require `Authorization: Bearer <access_token>`. JSON bodies
+use `snake_case`; timestamps are ISO 8601 values. Error responses use:
+
+```json
+{"code":"MODEL_NOT_CONFIGURED","message":"Configure and select a model provider before starting a chat."}
+```
+
+## Authentication and model configuration
+
+| Method | Path | Authentication | Purpose |
+| --- | --- | --- | --- |
+| `POST` | `/v1/auth/register` | No | Create an email/password account. |
+| `POST` | `/v1/auth/login` | No | Exchange email/password for a bearer token. |
+| `POST` | `/v1/auth/device` | No | Create or resume a local device account. |
+| `GET` | `/v1/users/me` | Yes | Return the current user. |
+| `POST` | `/v1/model-configurations` | Yes | Create or update a user-owned provider configuration. |
+| `POST` | `/v1/model-configurations/{id}/activate` | Yes | Make one configuration active. |
+| `DELETE` | `/v1/model-configurations/{id}` | Yes | Delete a configuration. |
+
+`POST /v1/model-configurations` accepts:
+
+```json
+{
+  "id": "client-generated-uuid",
+  "name": "My DeepSeek",
+  "provider_type": "DeepSeek",
+  "api_key": "provider-secret",
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-v4-flash",
+  "is_active": true
+}
+```
+
+The API key is encrypted at rest and is never returned. Clients retain only the configuration
+metadata after this request succeeds.
+
+## Chat streaming
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/v1/chat/stream` | Stream a client-supplied message context. |
+| `POST` | `/v1/conversations/{id}/generate` | Rebuild stored context and stream an assistant response. |
+| `POST` | `/v1/agents/run` | Run the current user's basic agent graph. |
+
+`POST /v1/chat/stream` accepts `messages`, optional `model`, optional
+`model_configuration_id`, `temperature` (`0`–`2`), and optional function `tools`.
+It responds with `Content-Type: text/event-stream`:
+
+```text
+event: message
+data: {"content":"Hello"}
+
+event: tool_call
+data: {"id":"call_1","name":"weather","arguments":{"location":"Shanghai"}}
+
+event: done
+data: {}
+```
+
+`message` events are emitted incrementally, including when tool definitions are supplied.
+
+## Workspaces, conversations, and messages
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET`, `POST` | `/v1/workspaces` | List or create workspaces. |
+| `PATCH` | `/v1/workspaces/{id}` | Update a workspace. |
+| `GET`, `POST` | `/v1/conversations` | List or create conversations. |
+| `GET`, `POST` | `/v1/conversations/{id}/messages` | List or create messages. |
+
+Conversation creation requires `workspace_id`, `model`, and optionally `id`, `title`, and
+`provider_type`. Message creation requires `role` (`user`, `assistant`, `system`, or `tool`) and
+`content`; `id`, `reasoning_content`, and `content_type` are optional.
+
+## Memory, prompts, files, and settings
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET`, `POST` | `/v1/memories` | List or create memories. |
+| `POST` | `/v1/memories/{id}/archive` | Archive a memory. |
+| `GET`, `POST` | `/v1/prompt-templates` | List or create prompt templates. |
+| `POST` | `/v1/files` | Upload a file as `multipart/form-data` with a `file` part. |
+| `POST` | `/v1/knowledge/documents/{file_id}` | Queue an uploaded file for knowledge processing. |
+| `GET`, `PUT` | `/v1/settings/{key}` | Read or set a user setting (`{"value":"..."}`). |
+
+Memory creation accepts `scope` (`GLOBAL`, `WORKSPACE`, or `CONVERSATION`) and `content`;
+workspace/conversation IDs and `kind` (`FACT` or `SUMMARY`) are optional. Prompt templates accept
+`name`, `content`, optional `workspace_id`, `priority`, and `is_enabled`.
+
+## Utility endpoints
+
+| Method | Path | Authentication | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/health` | No | Service readiness check. |
+| `POST` | `/v1/tools/search` | No | Search with `query` and optional `max_results`. |
+| `POST` | `/v1/tools/weather` | No | Weather lookup with `location` and optional `max_results`. |
+| `POST` | `/v1/tools/document-read` | No | Read an uploaded document; local JSON paths are development-only. |

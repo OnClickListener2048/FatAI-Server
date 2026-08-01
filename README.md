@@ -22,6 +22,8 @@ uv run python main.py
 
 也可使用 pip 安装依赖后执行 `python main.py`。服务默认监听 `http://127.0.0.1:8080`，OpenAPI 文档位于 `http://127.0.0.1:8080/docs`，健康检查为 `GET /health`。
 
+完整的静态接口说明见 [docs/API.md](docs/API.md)；它包含鉴权、用户模型配置、SSE 事件与主要领域接口。
+
 ## 配置
 
 从 `.env.example` 复制 `.env` 后按需设置：
