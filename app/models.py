@@ -66,5 +66,6 @@ class ToolDefinitionInput(BaseModel):
 class ChatStreamRequest(BaseModel):
     messages: list[ChatMessageInput] = Field(min_length=1)
     model: str | None = Field(default=None, max_length=256)
+    model_configuration_id: str | None = Field(default=None, min_length=1, max_length=64)
     temperature: float = Field(default=0.7, ge=0, le=2)
     tools: list[ToolDefinitionInput] = Field(default_factory=list)

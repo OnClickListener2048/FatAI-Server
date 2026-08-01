@@ -5,7 +5,7 @@ FatAI 的 FastAPI 后端，提供工具调用、流式 AI 对话、用户认证�
 ## 功能
 
 - 搜索、天气查询和文档转 Markdown 工具接口；文档解析通过 Docling 服务完成。
-- OpenAI 兼容模型的 Server-Sent Events（SSE）流式聊天，以及基于 LangGraph 的基础 Agent 运行入口。
+- 用户自带密钥（BYOK）的 OpenAI 兼容模型 Server-Sent Events（SSE）流式聊天，以及基于 LangGraph 的基础 Agent 运行入口。
 - JWT 用户认证，支持邮箱注册/登录和桌面端迁移期间的设备账号初始化。
 - 按用户隔离的工作区、会话、消息、记忆、提示词模板与应用设置同步。
 - 文件上传及知识库文档入队记录；当前知识库接口只负责入队和状态保存，不执行异步解析或检索。
@@ -28,8 +28,8 @@ uv run python main.py
 
 | 变量 | 说明 |
 | --- | --- |
-| `OPENAI_API_KEY` / `OPENAI_BASE_URL` | 流式聊天和 Agent 所需的 API Key 与可选兼容服务地址。 |
-| `DEFAULT_CHAT_MODEL` | 未指定模型时使用的模型，默认 `gpt-4o-mini`。 |
+| 用户模型密钥 | 在客户端的“模型提供商”中按用户添加；服务端以 JWT 认证的用户 ID 隔离保存，并用 `JWT_SECRET` 派生的密钥加密后存储。 |
+| `JWT_SECRET` | 访问令牌签名密钥，同时用于加密用户模型密钥；部署时必须替换默认值并保持稳定。 |
 | `DOCLING_SERVER_URL` | 文档解析服务地址，默认 `http://127.0.0.1:5001`。 |
 | `DATABASE_URL` | SQLAlchemy 异步连接串，默认 `sqlite+aiosqlite:///./fat_ai.db`；可使用 `postgresql+asyncpg://...`。 |
 | `JWT_SECRET` / `JWT_EXPIRATION_MINUTES` | 访问令牌签名密钥与有效期；生产环境必须替换默认密钥。 |
@@ -66,16 +66,16 @@ curl.exe -X POST http://127.0.0.1:8080/v1/auth/register `
   -d '{"email":"me@example.com","password":"password123","display_name":"Me"}'
 ```
 
-| 分组 | 接口 |
-| --- | --- |
-| 认证 | `POST /v1/auth/register`、`/auth/login`、`/auth/device`；`GET /v1/users/me` |
-| 工具与即时对话 | `POST /v1/tools/search`、`/tools/weather`、`/tools/document-read`、`/chat/stream` |
-| 工作区和会话 | `GET`/`POST /v1/workspaces`、`PATCH /v1/workspaces/{id}`；`GET`/`POST /v1/conversations`；`GET`/`POST /v1/conversations/{id}/messages` |
-| 持久化对话 | `POST /v1/conversations/{id}/generate`：服务端组合提示词、记忆和已保存消息后，以 SSE 返回回复并保存助手消息。 |
-| Agent | `POST /v1/agents/run`：运行当前基础 LangGraph 模型节点。 |
-| 记忆与提示词 | `GET`/`POST /v1/memories`、`POST /v1/memories/{id}/archive`、`GET`/`POST /v1/prompt-templates` |
-| 文件与知识库 | `POST /v1/files` 上传文件；`POST /v1/knowledge/documents/{file_id}` 创建知识库处理队列记录。 |
-| 设置 | `GET`/`PUT /v1/settings/{key}` |
+| 分组           | 接口                                                                                                                                   |
+|----------------|----------------------------------------------------------------------------------------------------------------------------------------|
+| 认证           | `POST /v1/auth/register`、`/auth/login`、`/auth/device`；`GET /v1/users/me`                                                            |
+| 工具与即时对话 | `POST /v1/tools/search`、`/tools/weather`、`/tools/document-read`、`/chat/stream`                                                      |
+| 工作区和会话   | `GET`/`POST /v1/workspaces`、`PATCH /v1/workspaces/{id}`；`GET`/`POST /v1/conversations`；`GET`/`POST /v1/conversations/{id}/messages` |
+| 持久化对话     | `POST /v1/conversations/{id}/generate`：服务端组合提示词、记忆和已保存消息后，以 SSE 返回回复并保存助手消息。                          |
+| Agent          | `POST /v1/agents/run`：运行当前基础 LangGraph 模型节点。                                                                               |
+| 记忆与提示词   | `GET`/`POST /v1/memories`、`POST /v1/memories/{id}/archive`、`GET`/`POST /v1/prompt-templates`                                         |
+| 文件与知识库   | `POST /v1/files` 上传文件；`POST /v1/knowledge/documents/{file_id}` 创建知识库处理队列记录。                                           |
+| 设置           | `GET`/`PUT /v1/settings/{key}`                                                                                                         |
 
 `POST /v1/chat/stream` 与会话生成接口均以 `text/event-stream` 返回 `message`、可选 `tool_call` 和最终 `done` 事件。详尽的请求体、响应模型和可交互调试入口请使用 `/docs`。
 

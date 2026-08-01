@@ -4,10 +4,10 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
-from app.core.config import Settings
 from app.models import ChatMessageInput
 from app.services.chat import LangChainChatService
 from app.services.errors import ServiceError
+from app.services.model_configurations import UserModelCredentials
 
 
 class AgentState(TypedDict):
@@ -17,16 +17,16 @@ class AgentState(TypedDict):
 class LangGraphAgentService:
     """LangGraph boundary for agents; later tool and approval nodes attach here."""
 
-    def __init__(self, settings: Settings) -> None:
-        self._settings = settings
+    def __init__(self, credentials: UserModelCredentials) -> None:
+        self._credentials = credentials
 
     async def run(self, messages: list[ChatMessageInput], model_name: str | None = None) -> str:
-        if not self._settings.openai_api_key:
-            raise ServiceError("MODEL_NOT_CONFIGURED", "The server model provider is not configured.", 503)
+        if not self._credentials.api_key:
+            raise ServiceError("MODEL_NOT_CONFIGURED", "The selected model provider is not configured.", 503)
         model = ChatOpenAI(
-            api_key=self._settings.openai_api_key,
-            base_url=str(self._settings.openai_base_url) if self._settings.openai_base_url else None,
-            model=model_name or self._settings.default_chat_model,
+            api_key=self._credentials.api_key,
+            base_url=self._credentials.base_url or None,
+            model=model_name or self._credentials.model,
         )
 
         async def invoke_model(state: AgentState) -> dict[str, list[BaseMessage]]:

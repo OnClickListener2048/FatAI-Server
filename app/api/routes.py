@@ -4,8 +4,10 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import Settings, get_settings
+from app.core.config import get_settings
+from app.db import User, get_session
 from app.models import (
     ChatStreamRequest,
     DocumentReadResponse,
@@ -16,7 +18,9 @@ from app.models import (
 )
 from app.services.chat import LangChainChatService
 from app.services.documents import DoclingDocumentService
+from app.services.model_configurations import get_user_model_credentials
 from app.services.search import DuckDuckGoSearchService, WeatherService
+from app.security import get_current_user
 
 router = APIRouter(prefix="/v1")
 
@@ -82,8 +86,15 @@ async def document_read(request: Request, service: DoclingDocumentService = Depe
 
 
 @router.post("/chat/stream")
-async def chat_stream(payload: ChatStreamRequest, settings: Settings = Depends(get_settings)) -> StreamingResponse:
-    service = LangChainChatService(settings)
+async def chat_stream(
+    payload: ChatStreamRequest,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> StreamingResponse:
+    credentials = await get_user_model_credentials(
+        session, user.id, payload.model_configuration_id, get_settings()
+    )
+    service = LangChainChatService(credentials)
     service.ensure_configured()
 
     async def events() -> AsyncIterator[str]:
@@ -97,5 +108,9 @@ async def chat_stream(payload: ChatStreamRequest, settings: Settings = Depends(g
     return StreamingResponse(
         events(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )

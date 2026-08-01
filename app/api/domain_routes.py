@@ -20,6 +20,7 @@ from app.db import (
     KnowledgeDocument,
     MemoryEntry,
     Message,
+    ModelConfiguration,
     PromptTemplate,
     User,
     Workspace,
@@ -28,6 +29,7 @@ from app.db import (
 from app.security import create_access_token, get_current_user, hash_password, verify_password
 from app.services.agent import LangGraphAgentService
 from app.services.chat import LangChainChatService
+from app.services.model_configurations import encrypt_api_key, get_user_model_credentials
 
 router = APIRouter(prefix="/v1")
 Session = Annotated[AsyncSession, Depends(get_session)]
@@ -99,6 +101,16 @@ class SettingInput(BaseModel):
     value: str = Field(max_length=20_000)
 
 
+class ModelConfigurationInput(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=160)
+    provider_type: str = Field(min_length=1, max_length=64)
+    api_key: str = Field(min_length=1, max_length=4096)
+    base_url: str = Field(max_length=1024)
+    model: str = Field(min_length=1, max_length=256)
+    is_active: bool = True
+
+
 class AgentRunInput(BaseModel):
     messages: list[ChatMessageInput] = Field(min_length=1)
     model: str | None = Field(default=None, max_length=256)
@@ -158,6 +170,61 @@ async def bootstrap_device(payload: DeviceBootstrapRequest, session: Session) ->
 @router.get("/users/me")
 async def me(user: CurrentUser) -> dict:
     return entity_payload(user)
+
+
+@router.post("/model-configurations", status_code=status.HTTP_201_CREATED)
+async def upsert_model_configuration(
+    payload: ModelConfigurationInput,
+    user: CurrentUser,
+    session: Session,
+) -> dict:
+    """Store a user's provider credentials encrypted at rest for server-side model calls."""
+    record = await session.scalar(
+        select(ModelConfiguration).where(ModelConfiguration.id == payload.id, ModelConfiguration.user_id == user.id)
+    )
+    if payload.is_active:
+        active_records = await session.scalars(
+            select(ModelConfiguration).where(ModelConfiguration.user_id == user.id, ModelConfiguration.is_active.is_(True))
+        )
+        for active_record in active_records:
+            active_record.is_active = False
+    values = payload.model_dump()
+    values["api_key_ciphertext"] = encrypt_api_key(values.pop("api_key"), get_settings())
+    if record is None:
+        record = ModelConfiguration(user_id=user.id, **values)
+        session.add(record)
+    else:
+        for key, value in values.items():
+            setattr(record, key, value)
+    await session.commit()
+    return {
+        "id": record.id,
+        "name": record.name,
+        "provider_type": record.provider_type,
+        "base_url": record.base_url,
+        "model": record.model,
+        "is_active": record.is_active,
+    }
+
+
+@router.delete("/model-configurations/{configuration_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_model_configuration(configuration_id: str, user: CurrentUser, session: Session) -> None:
+    record = await owned_or_404(session, ModelConfiguration, configuration_id, user.id)
+    await session.delete(record)
+    await session.commit()
+
+
+@router.post("/model-configurations/{configuration_id}/activate")
+async def activate_model_configuration(configuration_id: str, user: CurrentUser, session: Session) -> dict:
+    record = await owned_or_404(session, ModelConfiguration, configuration_id, user.id)
+    active_records = await session.scalars(
+        select(ModelConfiguration).where(ModelConfiguration.user_id == user.id, ModelConfiguration.is_active.is_(True))
+    )
+    for active_record in active_records:
+        active_record.is_active = False
+    record.is_active = True
+    await session.commit()
+    return {"id": record.id, "is_active": True}
 
 
 @router.get("/workspaces")
@@ -278,7 +345,8 @@ async def generate_conversation(
         ChatMessageInput(role=item.role if item.role in {"system", "user", "assistant"} else "system", content=item.content)
         for item in messages
     )
-    service = LangChainChatService(get_settings())
+    credentials = await get_user_model_credentials(session, user.id, None, get_settings())
+    service = LangChainChatService(credentials)
     service.ensure_configured()
     request = ChatStreamRequest(messages=context, model=conversation.model)
 
@@ -299,9 +367,10 @@ async def generate_conversation(
 
 
 @router.post("/agents/run")
-async def run_agent(payload: AgentRunInput, _: CurrentUser) -> dict:
+async def run_agent(payload: AgentRunInput, user: CurrentUser, session: Session) -> dict:
     """Initial LangGraph model node; tool and approval nodes extend this graph boundary."""
-    answer = await LangGraphAgentService(get_settings()).run(payload.messages, payload.model)
+    credentials = await get_user_model_credentials(session, user.id, None, get_settings())
+    answer = await LangGraphAgentService(credentials).run(payload.messages, payload.model)
     return {"content": answer}
 
 

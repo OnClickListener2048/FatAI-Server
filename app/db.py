@@ -47,6 +47,18 @@ class Conversation(IdTimestampMixin, Base):
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class ModelConfiguration(IdTimestampMixin, Base):
+    __tablename__ = "model_configurations"
+    __table_args__ = (UniqueConstraint("user_id", "id", name="uq_model_configurations_user_id"),)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    provider_type: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(160))
+    api_key_ciphertext: Mapped[str] = mapped_column(Text)
+    base_url: Mapped[str] = mapped_column(String(1024))
+    model: Mapped[str] = mapped_column(String(256))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class Message(IdTimestampMixin, Base):
     __tablename__ = "messages"
     conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id"), index=True)
