@@ -299,6 +299,7 @@ async def get_sync_snapshot(user: CurrentUser, session: Session) -> SyncSnapshot
             for record in records:
                 payload = snapshot_payload(entity_type, record)
                 payload["key"] = record.key
+                state = await session.get(SyncEntityState, (user.id, entity_type, record.key))
                 entities.append(
                     SyncChangeResponse(
                         cursor=0,
@@ -306,13 +307,14 @@ async def get_sync_snapshot(user: CurrentUser, session: Session) -> SyncSnapshot
                         entity_type=entity_type,
                         entity_id=record.key,
                         operation="UPSERT",
-                        sequence=1,
+                        sequence=state.sequence if state is not None else 1,
                         payload=payload,
                     )
                 )
             continue
         records = await session.scalars(select(model).where(model.user_id == user.id))
         for record in records:
+            state = await session.get(SyncEntityState, (user.id, entity_type, record.id))
             entities.append(
                 SyncChangeResponse(
                     cursor=0,
@@ -320,7 +322,7 @@ async def get_sync_snapshot(user: CurrentUser, session: Session) -> SyncSnapshot
                     entity_type=entity_type,
                     entity_id=record.id,
                     operation="UPSERT",
-                    sequence=1,
+                    sequence=state.sequence if state is not None else 1,
                     payload=snapshot_payload(entity_type, record),
                 )
             )
