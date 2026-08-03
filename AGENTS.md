@@ -32,3 +32,7 @@ There are currently no committed test files or configured test runner. Add new t
 Recent history uses concise Conventional Commit-style subjects, for example `feat: add device session sync support`. Use `feat:`, `fix:`, `docs:`, `refactor:`, or `test:` followed by a brief imperative summary. Keep each commit scoped to one change.
 
 Pull requests should state the behavior changed, list configuration or migration impacts, link the relevant issue when available, and include request/response examples or screenshots for API-visible changes. Call out any security-sensitive settings, especially local-path document access and JWT configuration.
+
+## API & Database Documentation
+
+Every change to an HTTP endpoint, request/response model, authentication or sync protocol, database model, migration, or persistence behavior must update `docs/API.md` in the same commit. New server interfaces must follow the existing authenticated `/v1` route structure, typed Pydantic models, ownership checks, and documented sync/idempotency conventions.
