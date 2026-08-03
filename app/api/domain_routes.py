@@ -12,7 +12,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.models import ChatMessageInput, ChatStreamRequest
+from app.models import (
+    ChatMessageInput,
+    ChatStreamRequest,
+    SyncChangeResponse,
+    SyncChangesResponse,
+    SyncOperationInput,
+    SyncOperationResponse,
+)
 from app.db import (
     AppSetting,
     Conversation,
@@ -22,6 +29,9 @@ from app.db import (
     Message,
     ModelConfiguration,
     PromptTemplate,
+    SyncChange,
+    SyncEntityState,
+    SyncOperation,
     User,
     Workspace,
     get_session,
@@ -126,6 +136,171 @@ async def owned_or_404(session: AsyncSession, model, entity_id: str, user_id: st
     if entity is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Resource was not found.")
     return entity
+
+
+SYNC_MODELS = {
+    "workspace": Workspace,
+    "conversation": Conversation,
+    "message": Message,
+    "memory": MemoryEntry,
+    "prompt_template": PromptTemplate,
+    "model_configuration": ModelConfiguration,
+}
+
+
+def sync_value(payload: dict, key: str, default=None):
+    return payload[key] if key in payload else default
+
+
+async def apply_sync_payload(
+    payload: SyncOperationInput,
+    user: User,
+    session: AsyncSession,
+) -> None:
+    if payload.entity_type == "setting":
+        key = str(sync_value(payload.payload, "key", payload.entity_id))
+        record = await session.scalar(
+            select(AppSetting).where(AppSetting.user_id == user.id, AppSetting.key == key)
+        )
+        if payload.operation == "DELETE":
+            if record is not None:
+                await session.delete(record)
+            return
+        if record is None:
+            session.add(AppSetting(user_id=user.id, key=key, value=str(sync_value(payload.payload, "value", ""))))
+        else:
+            record.value = str(sync_value(payload.payload, "value", ""))
+        return
+
+    model = SYNC_MODELS[payload.entity_type]
+    record = await session.scalar(
+        select(model).where(model.id == payload.entity_id, model.user_id == user.id)
+    )
+    if payload.operation == "DELETE":
+        if record is not None:
+            await session.delete(record)
+        return
+
+    values = dict(payload.payload)
+    values.pop("id", None)
+    values.pop("user_id", None)
+    if payload.entity_type == "model_configuration":
+        api_key = str(values.pop("api_key", ""))
+        if api_key:
+            values["api_key_ciphertext"] = encrypt_api_key(api_key, get_settings())
+        elif record is not None:
+            values.pop("api_key_ciphertext", None)
+    if record is None:
+        session.add(model(id=payload.entity_id, user_id=user.id, **values))
+    else:
+        for key, value in values.items():
+            if hasattr(record, key):
+                setattr(record, key, value)
+
+
+@router.post("/sync/operations", response_model=SyncOperationResponse)
+async def apply_sync_operation(
+    payload: SyncOperationInput,
+    user: CurrentUser,
+    session: Session,
+) -> SyncOperationResponse:
+    """Apply one durable, ordered and idempotent client mutation."""
+    previous = await session.scalar(
+        select(SyncOperation).where(SyncOperation.id == payload.operation_id, SyncOperation.user_id == user.id)
+    )
+    if previous is not None:
+        return SyncOperationResponse.model_validate(json.loads(previous.response_json))
+
+    state = await session.get(SyncEntityState, (user.id, payload.entity_type, payload.entity_id))
+    if state is None:
+        state = SyncEntityState(
+            user_id=user.id,
+            entity_type=payload.entity_type,
+            entity_id=payload.entity_id,
+            sequence=0,
+        )
+        session.add(state)
+        await session.flush()
+
+    applied = payload.sequence > state.sequence
+    cursor: int | None = None
+    if applied:
+        await apply_sync_payload(payload, user, session)
+        state.sequence = payload.sequence
+        change = SyncChange(
+            user_id=user.id,
+            operation_id=payload.operation_id,
+            entity_type=payload.entity_type,
+            entity_id=payload.entity_id,
+            operation=payload.operation,
+            sequence=payload.sequence,
+            payload_json=json.dumps(payload.payload, separators=(",", ":")),
+        )
+        session.add(change)
+        await session.flush()
+        cursor = change.cursor
+
+    result = SyncOperationResponse(
+        operation_id=payload.operation_id,
+        entity_type=payload.entity_type,
+        entity_id=payload.entity_id,
+        sequence=payload.sequence,
+        applied=applied,
+        cursor=cursor,
+    )
+    session.add(
+        SyncOperation(
+            id=payload.operation_id,
+            user_id=user.id,
+            entity_type=payload.entity_type,
+            entity_id=payload.entity_id,
+            operation=payload.operation,
+            sequence=payload.sequence,
+            applied=applied,
+            cursor=cursor,
+            response_json=result.model_dump_json(),
+        )
+    )
+    await session.commit()
+    return result
+
+
+@router.get("/sync/changes", response_model=SyncChangesResponse)
+async def list_sync_changes(
+    user: CurrentUser,
+    session: Session,
+    cursor: int = 0,
+    limit: int = 100,
+) -> SyncChangesResponse:
+    """Read server changes after a cursor for other client devices."""
+    limit = max(1, min(limit, 500))
+    records = list(
+        await session.scalars(
+            select(SyncChange)
+            .where(SyncChange.user_id == user.id, SyncChange.cursor > cursor)
+            .order_by(SyncChange.cursor)
+            .limit(limit + 1)
+        )
+    )
+    has_more = len(records) > limit
+    records = records[:limit]
+    changes = [
+        SyncChangeResponse(
+            cursor=record.cursor,
+            operation_id=record.operation_id,
+            entity_type=record.entity_type,
+            entity_id=record.entity_id,
+            operation=record.operation,
+            sequence=record.sequence,
+            payload=json.loads(record.payload_json),
+        )
+        for record in records
+    ]
+    return SyncChangesResponse(
+        changes=changes,
+        next_cursor=changes[-1].cursor if changes else cursor,
+        has_more=has_more,
+    )
 
 
 @router.post("/auth/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)

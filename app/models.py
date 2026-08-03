@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -69,3 +69,47 @@ class ChatStreamRequest(BaseModel):
     model_configuration_id: str | None = Field(default=None, min_length=1, max_length=64)
     temperature: float = Field(default=0.7, ge=0, le=2)
     tools: list[ToolDefinitionInput] = Field(default_factory=list)
+
+
+class SyncOperationInput(BaseModel):
+    operation_id: str = Field(min_length=1, max_length=64)
+    entity_type: Literal[
+        "workspace",
+        "conversation",
+        "message",
+        "memory",
+        "prompt_template",
+        "model_configuration",
+        "setting",
+    ]
+    entity_id: str = Field(min_length=1, max_length=64)
+    operation: Literal["UPSERT", "DELETE"]
+    sequence: int = Field(ge=1)
+    schema_version: int = Field(default=1, ge=1)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class SyncOperationResponse(BaseModel):
+    operation_id: str
+    entity_type: str
+    entity_id: str
+    sequence: int
+    applied: bool
+    cursor: int | None = None
+
+
+class SyncChangeResponse(BaseModel):
+    cursor: int
+    operation_id: str
+    entity_type: str
+    entity_id: str
+    operation: Literal["UPSERT", "DELETE"]
+    sequence: int
+    schema_version: int = 1
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class SyncChangesResponse(BaseModel):
+    changes: list[SyncChangeResponse]
+    next_cursor: int
+    has_more: bool

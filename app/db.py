@@ -121,6 +121,48 @@ class AppSetting(Base):
     value: Mapped[str] = mapped_column(Text)
 
 
+class SyncOperation(Base):
+    """Durable idempotency record for a client mutation."""
+
+    __tablename__ = "sync_operations"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    entity_type: Mapped[str] = mapped_column(String(64))
+    entity_id: Mapped[str] = mapped_column(String(64))
+    operation: Mapped[str] = mapped_column(String(16))
+    sequence: Mapped[int] = mapped_column(Integer)
+    applied: Mapped[bool] = mapped_column(Boolean, default=True)
+    cursor: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    response_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SyncEntityState(Base):
+    """Latest accepted sequence for each user-owned entity."""
+
+    __tablename__ = "sync_entity_states"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    entity_type: Mapped[str] = mapped_column(String(64), primary_key=True)
+    entity_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    sequence: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SyncChange(Base):
+    """Append-only change feed consumed by other client devices."""
+
+    __tablename__ = "sync_changes"
+    cursor: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    operation_id: Mapped[str] = mapped_column(String(64), index=True)
+    entity_type: Mapped[str] = mapped_column(String(64))
+    entity_id: Mapped[str] = mapped_column(String(64))
+    operation: Mapped[str] = mapped_column(String(16))
+    sequence: Mapped[int] = mapped_column(Integer)
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 engine = create_async_engine(get_settings().database_url, future=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
