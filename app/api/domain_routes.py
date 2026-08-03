@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -19,6 +19,7 @@ from app.models import (
     SyncChangesResponse,
     SyncOperationInput,
     SyncOperationResponse,
+    SyncSnapshotResponse,
 )
 from app.db import (
     AppSetting,
@@ -227,6 +228,9 @@ async def apply_sync_operation(
     if applied:
         await apply_sync_payload(payload, user, session)
         state.sequence = payload.sequence
+        change_payload = dict(payload.payload)
+        if payload.entity_type == "model_configuration":
+            change_payload.pop("api_key", None)
         change = SyncChange(
             user_id=user.id,
             operation_id=payload.operation_id,
@@ -234,7 +238,7 @@ async def apply_sync_operation(
             entity_id=payload.entity_id,
             operation=payload.operation,
             sequence=payload.sequence,
-            payload_json=json.dumps(payload.payload, separators=(",", ":")),
+            payload_json=json.dumps(change_payload, separators=(",", ":")),
         )
         session.add(change)
         await session.flush()
@@ -263,6 +267,64 @@ async def apply_sync_operation(
     )
     await session.commit()
     return result
+
+
+def snapshot_payload(entity_type: str, record: object) -> dict:
+    values = entity_payload(record)
+    values.pop("user_id", None)
+    values.pop("created_at", None)
+    values.pop("updated_at", None)
+    if entity_type == "model_configuration":
+        values.pop("api_key_ciphertext", None)
+    return values
+
+
+@router.get("/sync/snapshot", response_model=SyncSnapshotResponse)
+async def get_sync_snapshot(user: CurrentUser, session: Session) -> SyncSnapshotResponse:
+    """Return a complete server-owned snapshot for rebuilding an empty client database."""
+    entities: list[SyncChangeResponse] = []
+    cursor = await session.scalar(select(func.max(SyncChange.cursor)).where(SyncChange.user_id == user.id)) or 0
+    snapshot_models = (
+        ("workspace", Workspace),
+        ("conversation", Conversation),
+        ("message", Message),
+        ("memory", MemoryEntry),
+        ("prompt_template", PromptTemplate),
+        ("model_configuration", ModelConfiguration),
+        ("setting", AppSetting),
+    )
+    for entity_type, model in snapshot_models:
+        if entity_type == "setting":
+            records = await session.scalars(select(AppSetting).where(AppSetting.user_id == user.id))
+            for record in records:
+                payload = snapshot_payload(entity_type, record)
+                payload["key"] = record.key
+                entities.append(
+                    SyncChangeResponse(
+                        cursor=0,
+                        operation_id=f"snapshot:{entity_type}:{record.key}",
+                        entity_type=entity_type,
+                        entity_id=record.key,
+                        operation="UPSERT",
+                        sequence=1,
+                        payload=payload,
+                    )
+                )
+            continue
+        records = await session.scalars(select(model).where(model.user_id == user.id))
+        for record in records:
+            entities.append(
+                SyncChangeResponse(
+                    cursor=0,
+                    operation_id=f"snapshot:{entity_type}:{record.id}",
+                    entity_type=entity_type,
+                    entity_id=record.id,
+                    operation="UPSERT",
+                    sequence=1,
+                    payload=snapshot_payload(entity_type, record),
+                )
+            )
+    return SyncSnapshotResponse(entities=entities, cursor=cursor)
 
 
 @router.get("/sync/changes", response_model=SyncChangesResponse)

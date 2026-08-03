@@ -92,6 +92,25 @@ Memory creation accepts `scope` (`GLOBAL`, `WORKSPACE`, or `CONVERSATION`) and `
 workspace/conversation IDs and `kind` (`FACT` or `SUMMARY`) are optional. Prompt templates accept
 `name`, `content`, optional `workspace_id`, `priority`, and `is_enabled`.
 
+## Durable synchronization
+
+These authenticated endpoints support an offline-first client cache. Each client mutation
+contains a client-generated `operation_id`, an `entity_type`/`entity_id` pair, and a monotonically
+increasing `sequence` for that entity. Repeating the same `operation_id` is idempotent. Older
+sequences are acknowledged but not applied, so late retries cannot overwrite newer state.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/v1/sync/operations` | Apply one ordered, idempotent mutation. |
+| `GET` | `/v1/sync/snapshot` | Return all current user-owned entities and the current change cursor to rebuild an empty client database. |
+| `GET` | `/v1/sync/changes?cursor=<n>&limit=<n>` | Return changes after a cursor for incremental synchronization. |
+
+`POST /v1/sync/operations` accepts `operation_id`, `entity_type`, `entity_id`, `operation`
+(`UPSERT` or `DELETE`), `sequence`, `schema_version`, and the entity payload. Snapshot and change
+responses never include provider API keys; secrets remain encrypted on the server. Clients should
+apply snapshot entities first, persist the returned cursor, then consume changes in ascending
+cursor order and advance the cursor only after each local batch is committed.
+
 ## Utility endpoints
 
 | Method | Path | Authentication | Purpose |

@@ -113,3 +113,8 @@ class SyncChangesResponse(BaseModel):
     changes: list[SyncChangeResponse]
     next_cursor: int
     has_more: bool
+
+
+class SyncSnapshotResponse(BaseModel):
+    entities: list[SyncChangeResponse]
+    cursor: int
