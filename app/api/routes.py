@@ -17,6 +17,7 @@ from app.models import (
     WebSearchResponse,
 )
 from app.services.chat import LangChainChatService, ServerToolExecutor
+from app.services.context import assemble_context
 from app.services.documents import DoclingDocumentService
 from app.services.model_configurations import get_user_model_credentials
 from app.services.search import DuckDuckGoSearchService, WeatherService
@@ -100,8 +101,18 @@ async def chat_stream(
     )
     service.ensure_configured()
 
+    context = await assemble_context(
+        session,
+        user,
+        payload.workspace_id,
+        payload.conversation_id,
+        payload.messages,
+        payload.response_language_tag,
+        payload.tool_results,
+    )
+
     async def events() -> AsyncIterator[str]:
-        async for content, tool_calls in service.stream(payload):
+        async for content, tool_calls in service.stream(payload, context=context):
             if content:
                 yield f"event: message\ndata: {json.dumps({'content': content}, ensure_ascii=False)}\n\n"
             for tool_call in tool_calls:

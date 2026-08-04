@@ -206,3 +206,79 @@ class ModelConfigurationTest(unittest.TestCase):
         self.assertEqual(len(model.recorded_messages[1]), 3)
         self.assertIsInstance(model.recorded_messages[1][-1], ToolMessage)
         self.assertEqual(model.recorded_messages[1][-1].content, "result")
+
+    def test_server_assembles_context_from_database(self) -> None:
+        async def seed_and_verify() -> None:
+            from app.db import MemoryEntry, PromptTemplate, User, Workspace
+
+            async with SessionLocal() as session:
+                user_id = "context-test-user"
+                workspace_id = "context-workspace"
+                session.add(User(id=user_id, email="context@device.fatai.local", display_name="Context", password_hash="x"))
+                session.add_all(
+                    [
+                        Workspace(id=workspace_id, user_id=user_id, name="Research", system_prompt="Be precise."),
+                        PromptTemplate(
+                            id="tpl-1",
+                            user_id=user_id,
+                            workspace_id=workspace_id,
+                            name="Style",
+                            content="Answer in short bullets.",
+                            priority=100,
+                            is_enabled=True,
+                        ),
+                        MemoryEntry(
+                            id="mem-1",
+                            user_id=user_id,
+                            workspace_id=workspace_id,
+                            scope="WORKSPACE",
+                            kind="FACT",
+                            content="User prefers English.",
+                            is_archived=False,
+                        ),
+                    ]
+                )
+                await session.commit()
+
+                from app.services.context import assemble_context
+
+                user = await session.get(User, user_id)
+                history = [
+                    ChatMessageInput(role="user", content="What is the weather?"),
+                    ChatMessageInput(role="assistant", content="Let me check."),
+                ]
+                messages = await assemble_context(
+                    session,
+                    user,
+                    workspace_id,
+                    None,
+                    history,
+                    "zh",
+                    tool_results=["Document: report.pdf\nExtracted content."],
+                )
+                self.assertEqual(len(messages), 7)
+                self.assertEqual(messages[0].role, "system")
+                self.assertIn("The active application language is zh", messages[0].content)
+                self.assertIn("User-configured application instruction (Style)", messages[1].content)
+                self.assertIn("Current workspace: Research", messages[2].content)
+                self.assertIn("Be precise.", messages[2].content)
+                self.assertIn("User prefers English.", messages[3].content)
+                self.assertEqual(messages[4].content, "What is the weather?")
+                self.assertEqual(messages[5].content, "Let me check.")
+                self.assertEqual(messages[6].role, "system")
+                self.assertIn("Document: report.pdf", messages[6].content)
+
+                standalone = await assemble_context(
+                    session,
+                    user,
+                    None,
+                    None,
+                    [ChatMessageInput(role="user", content="Hello")],
+                    "en",
+                )
+                self.assertEqual(len(standalone), 2)
+                self.assertEqual(standalone[0].role, "system")
+                self.assertIn("The active application language is en", standalone[0].content)
+                self.assertEqual(standalone[1].content, "Hello")
+
+        asyncio.run(seed_and_verify())

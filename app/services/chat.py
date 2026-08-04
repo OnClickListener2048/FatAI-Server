@@ -88,7 +88,11 @@ class LangChainChatService:
         if not self._credentials.api_key:
             raise ServiceError("MODEL_NOT_CONFIGURED", "The selected model provider is not configured.", 503)
 
-    async def stream(self, request: ChatStreamRequest) -> AsyncIterator[tuple[str, list[dict[str, object]]]]:
+    async def stream(
+        self,
+        request: ChatStreamRequest,
+        context: list[ChatMessageInput] | None = None,
+    ) -> AsyncIterator[tuple[str, list[dict[str, object]]]]:
         self.ensure_configured()
 
         model = ChatOpenAI(
@@ -98,7 +102,7 @@ class LangChainChatService:
             temperature=request.temperature,
             streaming=True,
         )
-        messages = [self._to_langchain_message(message) for message in request.messages]
+        messages = [self._to_langchain_message(message) for message in (context or request.messages)]
         tool_definitions = self._tools.bindable(request.tools) if self._tools else []
         if tool_definitions:
             model = model.bind_tools(tool_definitions)

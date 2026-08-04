@@ -69,6 +69,10 @@ class ChatStreamRequest(BaseModel):
     model_configuration_id: str | None = Field(default=None, min_length=1, max_length=64)
     temperature: float = Field(default=0.7, ge=0, le=2)
     tools: list[ToolDefinitionInput] = Field(default_factory=list)
+    workspace_id: str | None = Field(default=None, max_length=64)
+    conversation_id: str | None = Field(default=None, max_length=64)
+    response_language_tag: str = Field(default="en", max_length=32)
+    tool_results: list[str] = Field(default_factory=list)
 
 
 class SyncOperationInput(BaseModel):

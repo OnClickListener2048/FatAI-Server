@@ -43,12 +43,20 @@ metadata after this request succeeds.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/v1/chat/stream` | Stream a client-supplied message context. |
+| `POST` | `/v1/chat/stream` | Stream a response to client-supplied conversation turns. |
 | `POST` | `/v1/conversations/{id}/generate` | Rebuild stored context and stream an assistant response. |
 | `POST` | `/v1/agents/run` | Run the current user's basic agent graph. |
 
-`POST /v1/chat/stream` accepts `messages`, optional `model`, optional
-`model_configuration_id`, `temperature` (`0`–`2`), and optional function `tools`.
+`POST /v1/chat/stream` accepts `messages` (raw conversation turns, not pre-assembled), optional
+`model`, optional `model_configuration_id`, `temperature` (`0`–`2`), optional function `tools`,
+optional `workspace_id` and `conversation_id`, optional `response_language_tag` (default `en`),
+and optional `tool_results` (string array of transient client-side tool output).
+
+Context is assembled server-side (`app/services/context.py`): the core policy, enabled prompt
+templates, the workspace instruction, recalled memories, and the history limit (last 20 turns)
+are layered in a fixed order; `tool_results` are appended after history. Clients therefore only
+send their own turns and never influence the instruction layers.
+
 It responds with `Content-Type: text/event-stream`:
 
 ```text
