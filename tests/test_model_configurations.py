@@ -282,3 +282,83 @@ class ModelConfigurationTest(unittest.TestCase):
                 self.assertEqual(standalone[1].content, "Hello")
 
         asyncio.run(seed_and_verify())
+
+    def test_delete_applies_even_with_stale_sequence(self) -> None:
+        response = self.client.post(
+            "/v1/sync/operations",
+            headers=self.headers,
+            json={
+                "operation_id": "op-upsert-1",
+                "entity_type": "message",
+                "entity_id": "msg-stale-delete",
+                "operation": "UPSERT",
+                "sequence": 5,
+                "schema_version": 1,
+                "payload": {"id": "msg-stale-delete", "conversation_id": "any-conversation", "role": "user", "content": "hello"},
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["applied"])
+
+        delete_response = self.client.post(
+            "/v1/sync/operations",
+            headers=self.headers,
+            json={
+                "operation_id": "op-delete-1",
+                "entity_type": "message",
+                "entity_id": "msg-stale-delete",
+                "operation": "DELETE",
+                "sequence": 1,
+                "schema_version": 1,
+                "payload": {},
+            },
+        )
+        self.assertEqual(delete_response.status_code, 200, delete_response.text)
+        self.assertTrue(delete_response.json()["applied"])
+
+        snapshot = self.client.get("/v1/sync/snapshot", headers=self.headers).json()
+        self.assertNotIn(
+            "msg-stale-delete",
+            [entity["entity_id"] for entity in snapshot["entities"] if entity["entity_type"] == "message"],
+        )
+
+    def test_chat_turn_persists_messages_and_ensures_conversation(self) -> None:
+        async def verify() -> None:
+            from app.api.routes import persist_chat_turn
+            from app.db import Conversation, Message, SyncChange, User, Workspace
+            from app.models import ChatStreamRequest
+            from sqlalchemy import select
+
+            async with SessionLocal() as session:
+                session.add(User(id="chat-persist-user", email="chat@device.fatai.local", display_name="Chat", password_hash="x"))
+                session.add(Workspace(id="chat-persist-workspace", user_id="chat-persist-user", name="W"))
+                await session.commit()
+                user = await session.get(User, "chat-persist-user")
+                payload = ChatStreamRequest(
+                    messages=[ChatMessageInput(role="user", content="What is the weather?")],
+                    conversation_id="chat-saved-conversation",
+                    workspace_id="chat-persist-workspace",
+                    user_message_id="chat-user-msg",
+                    assistant_message_id="chat-assistant-msg",
+                    model="test-model",
+                )
+                await persist_chat_turn(session, user, payload, "Sunny.")
+
+                conversation = await session.get(Conversation, "chat-saved-conversation")
+                self.assertIsNotNone(conversation)
+                self.assertEqual(conversation.model, "test-model")
+
+                user_message = await session.get(Message, "chat-user-msg")
+                assistant_message = await session.get(Message, "chat-assistant-msg")
+                self.assertEqual(user_message.content, "What is the weather?")
+                self.assertEqual(assistant_message.content, "Sunny.")
+                self.assertEqual(assistant_message.conversation_id, "chat-saved-conversation")
+
+                changes = list(
+                    await session.scalars(
+                        select(SyncChange).where(SyncChange.entity_id.in_(["chat-user-msg", "chat-assistant-msg"]))
+                    )
+                )
+                self.assertEqual(len(changes), 2)
+
+        asyncio.run(verify())

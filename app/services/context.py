@@ -67,6 +67,7 @@ async def assemble_context(
     history: list[ChatMessageInput],
     response_language_tag: str,
     tool_results: list[str] | None = None,
+    include_contextual_references: bool = True,
 ) -> list[ChatMessageInput]:
     """Layer policy and reference data around the client's raw conversation turns."""
     messages = [
@@ -75,7 +76,7 @@ async def assemble_context(
             content=SYSTEM_PROMPT.replace("{responseLanguageTag}", response_language_tag),
         )
     ]
-    if workspace_id is not None:
+    if include_contextual_references and workspace_id is not None:
         templates = (
             await session.scalars(
                 select(PromptTemplate)

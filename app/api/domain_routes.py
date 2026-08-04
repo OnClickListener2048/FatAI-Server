@@ -265,7 +265,10 @@ async def apply_sync_operation(
         session.add(state)
         await session.flush()
 
-    applied = payload.sequence > state.sequence
+    # Deletes always apply: chat messages are saved server-side with a server-assigned
+    # sequence the client cannot predict, so a client delete would otherwise be rejected as
+    # stale. Delete-wins also matches user intent across devices.
+    applied = payload.operation == "DELETE" or payload.sequence > state.sequence
     cursor: int | None = None
     if applied:
         await apply_sync_payload(payload, user, session)

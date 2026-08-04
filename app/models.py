@@ -73,6 +73,9 @@ class ChatStreamRequest(BaseModel):
     conversation_id: str | None = Field(default=None, max_length=64)
     response_language_tag: str = Field(default="en", max_length=32)
     tool_results: list[str] = Field(default_factory=list)
+    include_contextual_references: bool = True
+    user_message_id: str | None = Field(default=None, min_length=1, max_length=64)
+    assistant_message_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class SyncOperationInput(BaseModel):

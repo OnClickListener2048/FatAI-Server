@@ -50,12 +50,19 @@ metadata after this request succeeds.
 `POST /v1/chat/stream` accepts `messages` (raw conversation turns, not pre-assembled), optional
 `model`, optional `model_configuration_id`, `temperature` (`0`–`2`), optional function `tools`,
 optional `workspace_id` and `conversation_id`, optional `response_language_tag` (default `en`),
-and optional `tool_results` (string array of transient client-side tool output).
+optional `tool_results` (string array of transient client-side tool output), optional
+`include_contextual_references` (default `true`), and optional `user_message_id` /
+`assistant_message_id` (the client-owned ids under which the turn is persisted).
 
 Context is assembled server-side (`app/services/context.py`): the core policy, enabled prompt
 templates, the workspace instruction, recalled memories, and the history limit (last 20 turns)
 are layered in a fixed order; `tool_results` are appended after history. Clients therefore only
 send their own turns and never influence the instruction layers.
+
+Conversation chats (with `conversation_id` and `assistant_message_id`) are persisted directly:
+the server upserts the conversation when missing, saves the user turn and the assistant answer,
+and records both in the change stream, so the client no longer re-syncs chat messages. A
+disconnected stream still saves whatever was streamed so far.
 
 It responds with `Content-Type: text/event-stream`:
 
@@ -118,6 +125,10 @@ sequences are acknowledged but not applied, so late retries cannot overwrite new
 responses never include provider API keys; secrets remain encrypted on the server. Clients should
 apply snapshot entities first, persist the returned cursor, then consume changes in ascending
 cursor order and advance the cursor only after each local batch is committed.
+
+UPSERTs apply only when the payload `sequence` is higher than the entity's recorded sequence.
+DELETEs always apply (delete-wins): chat messages are saved server-side with a sequence the
+client cannot predict, so delete-wins keeps client-initiated deletes and regenerates working.
 
 ## Utility endpoints
 
