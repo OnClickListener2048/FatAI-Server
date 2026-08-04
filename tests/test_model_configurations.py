@@ -176,7 +176,9 @@ class ModelConfigurationTest(unittest.TestCase):
 
             async def execute(self, name: str, arguments: dict):
                 self.executed.append((name, arguments))
-                return "result"
+                from app.services.chat import ToolOutcome
+
+                return ToolOutcome("result", [{"title": "Example", "url": "https://example.test"}])
 
         model = StreamingModel()
         executor = RecordingExecutor()
@@ -197,7 +199,17 @@ class ModelConfigurationTest(unittest.TestCase):
         self.assertEqual(
             events,
             [
-                ("", [{"id": "call_1", "name": "web_search", "arguments": {"query": "test"}}]),
+                (
+                    "",
+                    [
+                        {
+                            "id": "call_1",
+                            "name": "web_search",
+                            "arguments": {"query": "test"},
+                            "sources": [{"title": "Example", "url": "https://example.test"}],
+                        }
+                    ],
+                ),
                 ("answer", []),
             ],
         )

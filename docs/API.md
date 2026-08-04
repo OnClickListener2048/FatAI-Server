@@ -71,13 +71,15 @@ event: message
 data: {"content":"Hello"}
 
 event: tool_call
-data: {"id":"call_1","name":"weather","arguments":{"location":"Shanghai"}}
+data: {"id":"call_1","name":"web_search","arguments":{"query":"iPhone 17 price"},"sources":[{"title":"Apple","url":"https://www.apple.com/iphone/"}]}
 
 event: done
 data: {}
 ```
 
 `message` events are emitted incrementally, including when tool definitions are supplied.
+`tool_call` events carry the structured `sources` (title and URL) produced by server-side tool
+execution, deduplicated by URL across the whole request.
 
 ## Workspaces, conversations, and messages
 

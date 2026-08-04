@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
@@ -10,6 +11,14 @@ from app.services.search import BingRssSearchService, WeatherService
 
 MAX_TOOL_OUTPUT_CHARACTERS = 24_000
 MAX_TOOL_ROUNDS = 3
+
+
+@dataclass
+class ToolOutcome:
+    """Formatted tool result plus the structured, citable sources for the client UI."""
+
+    content: str
+    sources: list[dict[str, str]] = field(default_factory=list)
 
 
 class ServerToolExecutor:
@@ -29,36 +38,42 @@ class ServerToolExecutor:
     def bindable(self, requested: list[ToolDefinitionInput]) -> list[dict[str, object]]:
         return [to_openai_tool(tool) for tool in requested if tool.name in self.SUPPORTED]
 
-    async def execute(self, name: str, arguments: dict[str, object]) -> str:
+    async def execute(self, name: str, arguments: dict[str, object]) -> ToolOutcome:
         try:
             if name == "web_search":
                 return await self._web_search(arguments)
             if name == "weather":
                 return await self._weather(arguments)
-            return f"Tool failed (TOOL_NOT_AVAILABLE): {name} is not available on the server."
+            return ToolOutcome(f"Tool failed (TOOL_NOT_AVAILABLE): {name} is not available on the server.")
         except ServiceError as error:
-            return f"Tool failed ({error.code}): {error.message}"
+            return ToolOutcome(f"Tool failed ({error.code}): {error.message}")
         except Exception:
-            return f"Tool failed (TOOL_EXECUTION_FAILED): {name} execution failed."
+            return ToolOutcome(f"Tool failed (TOOL_EXECUTION_FAILED): {name} execution failed.")
 
-    async def _web_search(self, arguments: dict[str, object]) -> str:
+    async def _web_search(self, arguments: dict[str, object]) -> ToolOutcome:
         query = str(arguments.get("query", "")).strip()
         if not query:
-            return "Tool failed (INVALID_ARGUMENT): query must not be blank."
+            return ToolOutcome("Tool failed (INVALID_ARGUMENT): query must not be blank.")
         max_results = max(1, min(int(arguments.get("max_results", 5)), 10))
         results = await self._search_service.search(query, max_results)
         if not results:
-            return f"No web results were found for: {query}"
-        return bounded(format_results(f"Web results for: {query}", results))
+            return ToolOutcome(f"No web results were found for: {query}")
+        return ToolOutcome(
+            bounded(format_results(f"Web results for: {query}", results)),
+            [{"title": result.title, "url": result.url} for result in results],
+        )
 
-    async def _weather(self, arguments: dict[str, object]) -> str:
+    async def _weather(self, arguments: dict[str, object]) -> ToolOutcome:
         location = str(arguments.get("location", "")).strip()
         if not location:
-            return "Tool failed (INVALID_ARGUMENT): location must not be blank."
+            return ToolOutcome("Tool failed (INVALID_ARGUMENT): location must not be blank.")
         results = await self._weather_service.weather(location, 10)
         if not results:
-            return f"No weather sources were found for: {location}"
-        return bounded(format_results(f"Weather references for: {location}", results))
+            return ToolOutcome(f"No weather sources were found for: {location}")
+        return ToolOutcome(
+            bounded(format_results(f"Weather references for: {location}", results)),
+            [{"title": result.title, "url": result.url} for result in results],
+        )
 
 
 def format_results(header: str, results: list[WebSearchResult]) -> str:
@@ -107,6 +122,9 @@ class LangChainChatService:
         if tool_definitions:
             model = model.bind_tools(tool_definitions)
 
+        # Sources are deduplicated across the whole request (the model may search several
+        # rounds and hit the same page twice), not per round.
+        seen_source_urls: set[str] = set()
         for round_index in range(MAX_TOOL_ROUNDS):
             combined_chunk = None
             async for chunk in model.astream(messages):
@@ -119,17 +137,30 @@ class LangChainChatService:
             tool_calls = combined_chunk.tool_calls
             if not tool_calls:
                 return
-            yield "", [to_provider_tool_call(call) for call in tool_calls]
             # AIMessageChunk has no to_message() in this langchain-core version; rebuild the
             # assistant turn from the normalized tool calls so the next round sees them.
             messages.append(
                 AIMessage(content=combined_chunk.content or "", tool_calls=combined_chunk.tool_calls)
             )
+            outcomes = []
             for call in tool_calls:
                 raw_arguments = call.get("args", {})
                 arguments = raw_arguments if isinstance(raw_arguments, dict) else {}
-                result = await self._tools.execute(str(call["name"]), arguments)
-                messages.append(ToolMessage(content=result, tool_call_id=str(call.get("id", ""))))
+                outcome = await self._tools.execute(str(call["name"]), arguments)
+                outcomes.append((call, outcome))
+                messages.append(ToolMessage(content=outcome.content, tool_call_id=str(call.get("id", ""))))
+            calls = []
+            for call, outcome in outcomes:
+                sources = []
+                for source in outcome.sources:
+                    url = source.get("url")
+                    if url and url in seen_source_urls:
+                        continue
+                    if url:
+                        seen_source_urls.add(url)
+                    sources.append(source)
+                calls.append(to_provider_tool_call(call, sources))
+            yield "", calls
             if round_index == MAX_TOOL_ROUNDS - 1:
                 # The model kept requesting tools; force a final answer without tool access so
                 # the user always receives a response built from the results already gathered.
@@ -175,9 +206,10 @@ def to_openai_tool(tool: ToolDefinitionInput) -> dict[str, object]:
     }
 
 
-def to_provider_tool_call(call: dict[str, object]) -> dict[str, object]:
+def to_provider_tool_call(call: dict[str, object], sources: list[dict[str, str]] | None = None) -> dict[str, object]:
     return {
         "id": call.get("id"),
         "name": str(call["name"]),
         "arguments": {key: str(value) for key, value in dict(call.get("args", {})).items()},
+        "sources": sources or [],
     }
