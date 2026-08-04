@@ -1,20 +1,25 @@
-from urllib.parse import parse_qs, unquote, urlparse
+import re
+import xml.etree.ElementTree as ET
+from urllib.parse import unquote
 
 import httpx
-from bs4 import BeautifulSoup
 
 from app.models import WebSearchResult
 from app.services.errors import ServiceError
 
+_TAG_PATTERN = re.compile(r"<[^>]+>")
 
-class DuckDuckGoSearchService:
-    """Development-only keyless search provider.
 
-    Production deployments should replace this service with an approved search provider while
-    retaining the API contract exposed to clients and LangChain tools.
+class BingRssSearchService:
+    """Keyless search provider backed by Bing's RSS output.
+
+    HTML scraping providers (DuckDuckGo, Bing HTML, Baidu) are IP-blocked from many residential
+    and datacenter networks. Bing's `format=rss` endpoint still returns server-rendered results
+    without JavaScript or an API key. Production deployments can replace this service with an
+    approved search provider while retaining the API contract exposed to clients and tools.
     """
 
-    SEARCH_URL = "https://html.duckduckgo.com/html/"
+    SEARCH_URL = "https://www.bing.com/search"
     USER_AGENT = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -31,7 +36,7 @@ class DuckDuckGoSearchService:
         try:
             response = await self._client.get(
                 self.SEARCH_URL,
-                params={"q": query},
+                params={"q": query, "format": "rss"},
                 headers={
                     "User-Agent": self.USER_AGENT,
                     "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
@@ -41,42 +46,35 @@ class DuckDuckGoSearchService:
         except httpx.HTTPError as error:
             raise ServiceError("SEARCH_UNAVAILABLE", "Search provider is unavailable.") from error
 
+        try:
+            root = ET.fromstring(response.text)
+        except ET.ParseError as error:
+            raise ServiceError("SEARCH_UNAVAILABLE", "Search provider returned an invalid feed.") from error
+
         results: list[WebSearchResult] = []
         seen_urls: set[str] = set()
-        document = BeautifulSoup(response.text, "html.parser")
-        for anchor in document.select("a.result__a"):
-            url = self._destination_url(anchor.get("href", ""))
-            title = anchor.get_text(" ", strip=True)
-            if not url or not title or url in seen_urls:
+        for item in root.findall(".//item"):
+            title = (item.findtext("title") or "").strip()
+            url = (item.findtext("link") or "").strip()
+            if not title or not url or url in seen_urls:
                 continue
-            container = anchor.find_parent(class_="result")
-            snippet_node = container.select_one("a.result__snippet") if container else None
+            description = _TAG_PATTERN.sub(" ", item.findtext("description") or "").strip()
+            seen_urls.add(url)
             results.append(
                 WebSearchResult(
                     title=title,
-                    snippet=snippet_node.get_text(" ", strip=True) if snippet_node else "",
+                    snippet=re.sub(r"\s+", " ", description),
                     url=url,
-                    source="duckduckgo",
+                    source="bing",
                 )
             )
-            seen_urls.add(url)
             if len(results) == max_results:
                 break
         return results
 
-    @staticmethod
-    def _destination_url(raw_url: str) -> str | None:
-        if raw_url.startswith("//"):
-            raw_url = f"https:{raw_url}"
-        parsed = urlparse(raw_url)
-        if parsed.path.startswith("/l/"):
-            destination = parse_qs(parsed.query).get("uddg", [""])[0]
-            raw_url = unquote(destination)
-        return raw_url if raw_url.startswith(("https://", "http://")) else None
-
 
 class WeatherService:
-    def __init__(self, search: DuckDuckGoSearchService) -> None:
+    def __init__(self, search: BingRssSearchService) -> None:
         self._search = search
 
     async def weather(self, location: str, max_results: int) -> list[WebSearchResult]:

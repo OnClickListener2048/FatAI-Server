@@ -22,13 +22,13 @@ from app.services.chat import LangChainChatService, ServerToolExecutor
 from app.services.context import assemble_context
 from app.services.documents import DoclingDocumentService
 from app.services.model_configurations import get_user_model_credentials
-from app.services.search import DuckDuckGoSearchService, WeatherService
+from app.services.search import BingRssSearchService, WeatherService
 from app.security import get_current_user
 
 router = APIRouter(prefix="/v1")
 
 
-def get_search_service(request: Request) -> DuckDuckGoSearchService:
+def get_search_service(request: Request) -> BingRssSearchService:
     return request.app.state.search_service
 
 
@@ -39,7 +39,7 @@ def get_document_service(request: Request) -> DoclingDocumentService:
 @router.post("/tools/search", response_model=WebSearchResponse)
 async def search(
     payload: WebSearchRequest,
-    service: DuckDuckGoSearchService = Depends(get_search_service),
+    service: BingRssSearchService = Depends(get_search_service),
 ) -> WebSearchResponse:
     query = payload.query.strip()
     return WebSearchResponse(query=query, results=await service.search(query, payload.max_results))
@@ -48,7 +48,7 @@ async def search(
 @router.post("/tools/weather", response_model=WeatherResponse)
 async def weather(
     payload: WeatherRequest,
-    search_service: DuckDuckGoSearchService = Depends(get_search_service),
+    search_service: BingRssSearchService = Depends(get_search_service),
 ) -> WeatherResponse:
     location = payload.location.strip()
     service = WeatherService(search_service)

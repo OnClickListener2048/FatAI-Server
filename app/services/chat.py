@@ -6,10 +6,10 @@ from langchain_openai import ChatOpenAI
 from app.models import ChatMessageInput, ChatStreamRequest, ToolDefinitionInput, WebSearchResult
 from app.services.errors import ServiceError
 from app.services.model_configurations import UserModelCredentials
-from app.services.search import DuckDuckGoSearchService, WeatherService
+from app.services.search import BingRssSearchService, WeatherService
 
 MAX_TOOL_OUTPUT_CHARACTERS = 24_000
-MAX_TOOL_ROUNDS = 5
+MAX_TOOL_ROUNDS = 3
 
 
 class ServerToolExecutor:
@@ -22,7 +22,7 @@ class ServerToolExecutor:
 
     SUPPORTED = frozenset({"web_search", "weather"})
 
-    def __init__(self, search_service: DuckDuckGoSearchService) -> None:
+    def __init__(self, search_service: BingRssSearchService) -> None:
         self._search_service = search_service
         self._weather_service = WeatherService(search_service)
 
@@ -107,7 +107,7 @@ class LangChainChatService:
         if tool_definitions:
             model = model.bind_tools(tool_definitions)
 
-        for _ in range(MAX_TOOL_ROUNDS):
+        for round_index in range(MAX_TOOL_ROUNDS):
             combined_chunk = None
             async for chunk in model.astream(messages):
                 combined_chunk = chunk if combined_chunk is None else combined_chunk + chunk
@@ -120,13 +120,31 @@ class LangChainChatService:
             if not tool_calls:
                 return
             yield "", [to_provider_tool_call(call) for call in tool_calls]
-            messages.append(combined_chunk.to_message())
+            # AIMessageChunk has no to_message() in this langchain-core version; rebuild the
+            # assistant turn from the normalized tool calls so the next round sees them.
+            messages.append(
+                AIMessage(content=combined_chunk.content or "", tool_calls=combined_chunk.tool_calls)
+            )
             for call in tool_calls:
                 raw_arguments = call.get("args", {})
                 arguments = raw_arguments if isinstance(raw_arguments, dict) else {}
                 result = await self._tools.execute(str(call["name"]), arguments)
                 messages.append(ToolMessage(content=result, tool_call_id=str(call.get("id", ""))))
-        yield "I could not complete this request because the tool loop exceeded its limit.", []
+            if round_index == MAX_TOOL_ROUNDS - 1:
+                # The model kept requesting tools; force a final answer without tool access so
+                # the user always receives a response built from the results already gathered.
+                model = ChatOpenAI(
+                    api_key=self._credentials.api_key,
+                    base_url=self._credentials.base_url or None,
+                    model=request.model or self._credentials.model,
+                    temperature=request.temperature,
+                    streaming=True,
+                )
+
+        async for chunk in model.astream(messages):
+            content = chunk.content
+            if isinstance(content, str) and content:
+                yield content, []
 
     @staticmethod
     def _to_langchain_message(message: ChatMessageInput) -> SystemMessage | HumanMessage | AIMessage:

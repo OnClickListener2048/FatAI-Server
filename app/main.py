@@ -12,7 +12,7 @@ from app.models import ApiError, HealthResponse
 from app.api.domain_routes import router as domain_router
 from app.services.documents import DoclingDocumentService
 from app.services.errors import ServiceError
-from app.services.search import DuckDuckGoSearchService
+from app.services.search import BingRssSearchService
 
 
 @asynccontextmanager
@@ -20,7 +20,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     await initialize_database()
     client = httpx.AsyncClient(timeout=settings.request_timeout_seconds, follow_redirects=True)
-    app.state.search_service = DuckDuckGoSearchService(client)
+    app.state.search_service = BingRssSearchService(client)
     app.state.document_service = DoclingDocumentService(
         client=client,
         server_url=str(settings.docling_server_url),
