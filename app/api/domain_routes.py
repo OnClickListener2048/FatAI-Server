@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, 
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -153,6 +154,47 @@ def sync_value(payload: dict, key: str, default=None):
     return payload[key] if key in payload else default
 
 
+async def record_change(
+    session: AsyncSession,
+    user: User,
+    entity_type: str,
+    entity_id: str,
+    operation: str,
+    payload: dict,
+) -> int:
+    """Record a server-side mutation in the change stream.
+
+    REST endpoints bypass the client sync protocol, but their writes must still reach every
+    device through /v1/sync/changes. The sequence is assigned server-side, which is safe
+    because REST writes never race with client sequence counters for the same entity.
+    """
+    state = await session.get(SyncEntityState, (user.id, entity_type, entity_id))
+    sequence = (state.sequence if state is not None else 0) + 1
+    if state is None:
+        session.add(SyncEntityState(user_id=user.id, entity_type=entity_type, entity_id=entity_id, sequence=sequence))
+    else:
+        state.sequence = sequence
+    clean = dict(payload)
+    clean.pop("user_id", None)
+    clean.pop("created_at", None)
+    clean.pop("updated_at", None)
+    if entity_type == "model_configuration":
+        clean.pop("api_key_ciphertext", None)
+        clean.pop("api_key", None)
+    session.add(
+        SyncChange(
+            user_id=user.id,
+            operation_id=f"rest:{entity_type}:{entity_id}:{sequence}",
+            entity_type=entity_type,
+            entity_id=entity_id,
+            operation=operation,
+            sequence=sequence,
+            payload_json=json.dumps(clean, separators=(",", ":")),
+        )
+    )
+    return sequence
+
+
 async def apply_sync_payload(
     payload: SyncOperationInput,
     user: User,
@@ -265,7 +307,18 @@ async def apply_sync_operation(
             response_json=result.model_dump_json(),
         )
     )
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        # A concurrent duplicate of the same operation_id won the insert race. Replay its
+        # stored response instead of surfacing a primary-key conflict.
+        await session.rollback()
+        previous = await session.scalar(
+            select(SyncOperation).where(SyncOperation.id == payload.operation_id, SyncOperation.user_id == user.id)
+        )
+        if previous is not None:
+            return SyncOperationResponse.model_validate(json.loads(previous.response_json))
+        raise
     return result
 
 
@@ -408,7 +461,9 @@ async def bootstrap_device(payload: DeviceBootstrapRequest, session: Session) ->
 
 @router.get("/users/me")
 async def me(user: CurrentUser) -> dict:
-    return entity_payload(user)
+    values = entity_payload(user)
+    values.pop("password_hash", None)
+    return values
 
 
 @router.post("/model-configurations", status_code=status.HTTP_201_CREATED)
@@ -435,6 +490,8 @@ async def upsert_model_configuration(
     else:
         for key, value in values.items():
             setattr(record, key, value)
+    await session.flush()
+    await record_change(session, user, "model_configuration", record.id, "UPSERT", entity_payload(record))
     await session.commit()
     return {
         "id": record.id,
@@ -450,6 +507,7 @@ async def upsert_model_configuration(
 async def delete_model_configuration(configuration_id: str, user: CurrentUser, session: Session) -> None:
     record = await owned_or_404(session, ModelConfiguration, configuration_id, user.id)
     await session.delete(record)
+    await record_change(session, user, "model_configuration", configuration_id, "DELETE", {})
     await session.commit()
 
 
@@ -462,6 +520,7 @@ async def activate_model_configuration(configuration_id: str, user: CurrentUser,
     for active_record in active_records:
         active_record.is_active = False
     record.is_active = True
+    await record_change(session, user, "model_configuration", record.id, "UPSERT", entity_payload(record))
     await session.commit()
     return {"id": record.id, "is_active": True}
 
@@ -479,6 +538,7 @@ async def create_workspace(payload: WorkspaceInput, user: CurrentUser, session: 
         if existing is not None:
             existing.name = payload.name.strip()
             existing.system_prompt = payload.system_prompt.strip()
+            await record_change(session, user, "workspace", existing.id, "UPSERT", entity_payload(existing))
             await session.commit()
             return entity_payload(existing)
     workspace = Workspace(
@@ -489,6 +549,8 @@ async def create_workspace(payload: WorkspaceInput, user: CurrentUser, session: 
     if payload.id:
         workspace.id = payload.id
     session.add(workspace)
+    await session.flush()
+    await record_change(session, user, "workspace", workspace.id, "UPSERT", entity_payload(workspace))
     await session.commit()
     await session.refresh(workspace)
     return entity_payload(workspace)
@@ -498,6 +560,7 @@ async def create_workspace(payload: WorkspaceInput, user: CurrentUser, session: 
 async def update_workspace(workspace_id: str, payload: WorkspaceInput, user: CurrentUser, session: Session) -> dict:
     workspace = await owned_or_404(session, Workspace, workspace_id, user.id)
     workspace.name, workspace.system_prompt = payload.name.strip(), payload.system_prompt.strip()
+    await record_change(session, user, "workspace", workspace.id, "UPSERT", entity_payload(workspace))
     await session.commit()
     return entity_payload(workspace)
 
@@ -516,6 +579,8 @@ async def create_conversation(payload: ConversationInput, user: CurrentUser, ses
     await owned_or_404(session, Workspace, payload.workspace_id, user.id)
     record = Conversation(user_id=user.id, **payload.model_dump(exclude_none=True))
     session.add(record)
+    await session.flush()
+    await record_change(session, user, "conversation", record.id, "UPSERT", entity_payload(record))
     await session.commit()
     await session.refresh(record)
     return entity_payload(record)
@@ -533,6 +598,8 @@ async def create_message(conversation_id: str, payload: MessageInput, user: Curr
     await owned_or_404(session, Conversation, conversation_id, user.id)
     record = Message(conversation_id=conversation_id, user_id=user.id, **payload.model_dump(exclude_none=True))
     session.add(record)
+    await session.flush()
+    await record_change(session, user, "message", record.id, "UPSERT", entity_payload(record))
     await session.commit()
     await session.refresh(record)
     return entity_payload(record)
@@ -598,7 +665,10 @@ async def generate_conversation(
             for tool_call in tool_calls:
                 yield f"event: tool_call\ndata: {json.dumps(tool_call, ensure_ascii=False)}\n\n"
         if answer:
-            session.add(Message(conversation_id=conversation.id, user_id=user.id, role="assistant", content=answer))
+            message = Message(conversation_id=conversation.id, user_id=user.id, role="assistant", content=answer)
+            session.add(message)
+            await session.flush()
+            await record_change(session, user, "message", message.id, "UPSERT", entity_payload(message))
             await session.commit()
         yield "event: done\ndata: {}\n\n"
 
@@ -628,6 +698,8 @@ async def list_memories(user: CurrentUser, session: Session, workspace_id: str |
 async def create_memory(payload: MemoryInput, user: CurrentUser, session: Session) -> dict:
     record = MemoryEntry(user_id=user.id, **payload.model_dump(exclude_none=True))
     session.add(record)
+    await session.flush()
+    await record_change(session, user, "memory", record.id, "UPSERT", entity_payload(record))
     await session.commit()
     await session.refresh(record)
     return entity_payload(record)
@@ -637,6 +709,7 @@ async def create_memory(payload: MemoryInput, user: CurrentUser, session: Sessio
 async def archive_memory(memory_id: str, user: CurrentUser, session: Session) -> dict:
     record = await owned_or_404(session, MemoryEntry, memory_id, user.id)
     record.is_archived = True
+    await record_change(session, user, "memory", record.id, "UPSERT", entity_payload(record))
     await session.commit()
     return entity_payload(record)
 
@@ -654,6 +727,8 @@ async def list_prompts(user: CurrentUser, session: Session, workspace_id: str | 
 async def create_prompt(payload: PromptInput, user: CurrentUser, session: Session) -> dict:
     record = PromptTemplate(user_id=user.id, **payload.model_dump(exclude_none=True))
     session.add(record)
+    await session.flush()
+    await record_change(session, user, "prompt_template", record.id, "UPSERT", entity_payload(record))
     await session.commit()
     await session.refresh(record)
     return entity_payload(record)
@@ -717,5 +792,6 @@ async def set_setting(key: str, payload: SettingInput, user: CurrentUser, sessio
         session.add(record)
     else:
         record.value = payload.value
+    await record_change(session, user, "setting", key, "UPSERT", {"key": key, "value": record.value})
     await session.commit()
     return {"key": key, "value": record.value}
