@@ -16,7 +16,7 @@ from app.models import (
     WebSearchRequest,
     WebSearchResponse,
 )
-from app.services.chat import LangChainChatService
+from app.services.chat import LangChainChatService, ServerToolExecutor
 from app.services.documents import DoclingDocumentService
 from app.services.model_configurations import get_user_model_credentials
 from app.services.search import DuckDuckGoSearchService, WeatherService
@@ -88,13 +88,16 @@ async def document_read(request: Request, service: DoclingDocumentService = Depe
 @router.post("/chat/stream")
 async def chat_stream(
     payload: ChatStreamRequest,
+    request: Request,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> StreamingResponse:
     credentials = await get_user_model_credentials(
         session, user.id, payload.model_configuration_id, get_settings()
     )
-    service = LangChainChatService(credentials)
+    service = LangChainChatService(
+        credentials, ServerToolExecutor(get_search_service(request))
+    )
     service.ensure_configured()
 
     async def events() -> AsyncIterator[str]:

@@ -125,3 +125,84 @@ class ModelConfigurationTest(unittest.TestCase):
                 return [event async for event in service.stream(request)]
 
         self.assertEqual(asyncio.run(collect()), [("stream", []), ("ed", [])])
+
+    def test_server_executes_tools_inside_stream(self) -> None:
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        class Chunk:
+            def __init__(self, content: str, tool_calls: list[dict] | None = None) -> None:
+                self.content = content
+                self.tool_calls = tool_calls or []
+
+            def __add__(self, other: "Chunk") -> "Chunk":
+                return Chunk(self.content + other.content, self.tool_calls + other.tool_calls)
+
+            def to_message(self) -> AIMessage:
+                return AIMessage(content=self.content, tool_calls=self.tool_calls)
+
+        class StreamingModel:
+            def __init__(self) -> None:
+                self.rounds = 0
+                self.recorded_messages: list[list[object]] = []
+
+            def bind_tools(self, tools):
+                self.bound_tools = tools
+                return self
+
+            async def astream(self, messages):
+                self.recorded_messages.append(list(messages))
+                if self.rounds == 0:
+                    self.rounds += 1
+                    yield Chunk("", [{"id": "call_1", "name": "web_search", "args": {"query": "test"}}])
+                else:
+                    yield Chunk("answer")
+
+        class RecordingExecutor:
+            def __init__(self) -> None:
+                self.executed: list[tuple[str, dict]] = []
+
+            def bindable(self, requested):
+                return [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": {"type": "object", "properties": {}, "required": []},
+                        },
+                    }
+                    for tool in requested
+                ]
+
+            async def execute(self, name: str, arguments: dict):
+                self.executed.append((name, arguments))
+                return "result"
+
+        model = StreamingModel()
+        executor = RecordingExecutor()
+        request = ChatStreamRequest(
+            messages=[ChatMessageInput(role="user", content="Hello")],
+            tools=[ToolDefinitionInput(name="web_search", description="Search")],
+        )
+
+        async def collect() -> list[tuple[str, list[dict[str, object]]]]:
+            service = LangChainChatService(
+                UserModelCredentials("test-key", "https://example.test/v1", "test-model"),
+                executor,
+            )
+            with patch("app.services.chat.ChatOpenAI", return_value=model):
+                return [event async for event in service.stream(request)]
+
+        events = asyncio.run(collect())
+        self.assertEqual(
+            events,
+            [
+                ("", [{"id": "call_1", "name": "web_search", "arguments": {"query": "test"}}]),
+                ("answer", []),
+            ],
+        )
+        self.assertEqual(executor.executed, [("web_search", {"query": "test"})])
+        self.assertEqual(len(model.recorded_messages), 2)
+        self.assertEqual(len(model.recorded_messages[1]), 3)
+        self.assertIsInstance(model.recorded_messages[1][-1], ToolMessage)
+        self.assertEqual(model.recorded_messages[1][-1].content, "result")
