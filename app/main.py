@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import logging
 
 import httpx
 from fastapi import FastAPI, Request
@@ -31,6 +32,11 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
+    )
     settings = get_settings()
     app = FastAPI(title="FatAI Server", version="0.1.0", lifespan=lifespan)
     if settings.cors_origins:

@@ -78,14 +78,10 @@ class ModelConfigurationTest(unittest.TestCase):
 
         asyncio.run(verify())
 
-        class FakeChunk:
-            content = "hello"
+        async def model_stream(*_args, **_kwargs):
+            yield "hello", [], ""
 
-        class FakeModel:
-            async def astream(self, _messages):
-                yield FakeChunk()
-
-        with patch("app.api.routes.ChatOpenAI", return_value=FakeModel()):
+        with patch("app.api.routes.LangChainChatService.stream", model_stream):
             stream_response = self.client.post(
                 "/v1/chat/stream",
                 headers=self.headers,
@@ -121,14 +117,14 @@ class ModelConfigurationTest(unittest.TestCase):
             tools=[ToolDefinitionInput(name="weather", description="Get weather")],
         )
 
-        async def collect() -> list[tuple[str, list[dict[str, object]]]]:
+        async def collect() -> list[tuple[str, list[dict[str, object]], str]]:
             service = LangChainChatService(
                 UserModelCredentials("test-key", "https://example.test/v1", "test-model")
             )
             with patch("app.services.chat.ChatOpenAI", return_value=model):
                 return [event async for event in service.stream(request)]
 
-        self.assertEqual(asyncio.run(collect()), [("stream", []), ("ed", [])])
+        self.assertEqual(asyncio.run(collect()), [("stream", [], ""), ("ed", [], "")])
 
     def test_server_executes_tools_inside_stream(self) -> None:
         from langchain_core.messages import AIMessage, ToolMessage
@@ -191,7 +187,7 @@ class ModelConfigurationTest(unittest.TestCase):
             tools=[ToolDefinitionInput(name="web_search", description="Search")],
         )
 
-        async def collect() -> list[tuple[str, list[dict[str, object]]]]:
+        async def collect() -> list[tuple[str, list[dict[str, object]], str]]:
             service = LangChainChatService(
                 UserModelCredentials("test-key", "https://example.test/v1", "test-model"),
                 executor,
@@ -213,8 +209,9 @@ class ModelConfigurationTest(unittest.TestCase):
                             "sources": [{"title": "Example", "url": "https://example.test"}],
                         }
                     ],
+                    "",
                 ),
-                ("answer", []),
+                ("answer", [], ""),
             ],
         )
         self.assertEqual(executor.executed, [("web_search", {"query": "test"})])

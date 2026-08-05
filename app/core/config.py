@@ -23,9 +23,6 @@ class Settings(BaseSettings):
     jwt_expiration_minutes: int = Field(default=60 * 24 * 7, gt=0)
     upload_directory: str = "data/uploads"
     allow_local_document_paths: bool = True
-    # Temporarily disabled for a pure-LLM passthrough test; re-enable with
-    # ENABLE_CHAT_TOOLS=true once the tool loop is compared.
-    enable_chat_tools: bool = False
 
 
 @lru_cache

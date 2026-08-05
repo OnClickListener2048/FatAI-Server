@@ -1,9 +1,11 @@
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+import asyncio
+import json
 import logging
 import time
 
-import asyncio
+import httpx
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
@@ -115,8 +117,18 @@ class LangChainChatService:
         self,
         request: ChatStreamRequest,
         context: list[ChatMessageInput] | None = None,
-    ) -> AsyncIterator[tuple[str, list[dict[str, object]]]]:
+    ) -> AsyncIterator[tuple[str, list[dict[str, object]], str]]:
+        """Streams a chat turn.
+
+        Yields ``(content, tool_calls, reasoning_content)`` tuples. In thinking mode the
+        provider stream is forwarded directly (LangChain drops reasoning_content), in
+        non-thinking mode the LangChain tool loop is used.
+        """
         self.ensure_configured()
+        if request.thinking:
+            async for content, tool_calls, reasoning in self._stream_direct(request, context):
+                yield content, tool_calls, reasoning
+            return
 
         model = ChatOpenAI(
             api_key=self._credentials.api_key,
@@ -124,6 +136,7 @@ class LangChainChatService:
             model=request.model or self._credentials.model,
             temperature=request.temperature,
             streaming=True,
+            extra_body={"thinking": {"type": "disabled"}},
         )
         messages = [self._to_langchain_message(message) for message in (context or request.messages)]
         tool_definitions = self._tools.bindable(request.tools) if self._tools else []
@@ -151,13 +164,13 @@ class LangChainChatService:
                     while buffered_chars > NARRATION_BUFFER_CHARS and buffered_content:
                         piece = buffered_content.pop(0)
                         buffered_chars -= len(piece)
-                        yield piece, []
+                        yield piece, [], ""
             if combined_chunk is None:
                 return
             tool_calls = combined_chunk.tool_calls
             if not tool_calls:
                 for content in buffered_content:
-                    yield content, []
+                    yield content, [], ""
                 logger.info(
                     "[PERF] round=%d model=%.2fs total=%.2fs final_answer=%d chars",
                     round_index + 1,
@@ -208,7 +221,7 @@ class LangChainChatService:
                         seen_source_urls.add(url)
                     sources.append(source)
                 calls.append(to_provider_tool_call(call, sources))
-            yield "", calls
+            yield "", calls, ""
             if round_index == MAX_TOOL_ROUNDS - 1:
                 # The model kept requesting tools; force a final answer without tool access so
                 # the user always receives a response built from the results already gathered.
@@ -218,6 +231,7 @@ class LangChainChatService:
                     model=request.model or self._credentials.model,
                     temperature=request.temperature,
                     streaming=True,
+                    extra_body={"thinking": {"type": "disabled"}},
                 )
             round_started_at = time.perf_counter()
 
@@ -225,7 +239,7 @@ class LangChainChatService:
         async for chunk in model.astream(messages):
             content = chunk.content
             if isinstance(content, str) and content:
-                yield content, []
+                yield content, [], ""
         logger.info(
             "[PERF] final model=%.2fs total=%.2fs (forced answer round)",
             time.perf_counter() - forced_started_at,
@@ -239,6 +253,195 @@ class LangChainChatService:
         if message.role == "assistant":
             return AIMessage(content=message.content)
         return HumanMessage(content=message.content)
+
+    async def _stream_direct(
+        self,
+        request: ChatStreamRequest,
+        context: list[ChatMessageInput] | None = None,
+    ) -> AsyncIterator[tuple[str, list[dict[str, object]], str]]:
+        """Thinking-mode streaming straight from the provider's SSE feed.
+
+        LangChain's ChatOpenAI discards ``reasoning_content``, so thinking mode bypasses it:
+        messages go to the provider via httpx and both content and reasoning are forwarded.
+        Tools still run as a loop (advertise, execute, feed back) when the model asks for them.
+        """
+        base_url = (self._credentials.base_url or "https://api.deepseek.com").rstrip("/")
+        messages = [{"role": message.role, "content": message.content} for message in (context or request.messages)]
+        tool_definitions = self._tools.bindable(request.tools) if self._tools else []
+        seen_source_urls: set[str] = set()
+        stream_started_at = time.perf_counter()
+        round_started_at = time.perf_counter()
+        for round_index in range(MAX_TOOL_ROUNDS):
+            combined_chunk = None
+            buffered_content: list[str] = []
+            buffered_chars = 0
+            async for delta in self._direct_stream_once(
+                base_url, messages, request, tool_definitions if round_index < MAX_TOOL_ROUNDS - 1 else []
+            ):
+                combined_chunk = delta if combined_chunk is None else _merge_delta(combined_chunk, delta)
+                reasoning = delta.get("reasoning_content") or ""
+                if reasoning:
+                    yield "", [], reasoning
+                content = delta.get("content") or ""
+                if content:
+                    buffered_content.append(content)
+                    buffered_chars += len(content)
+                    while buffered_chars > NARRATION_BUFFER_CHARS and buffered_content:
+                        piece = buffered_content.pop(0)
+                        buffered_chars -= len(piece)
+                        yield piece, [], ""
+            if combined_chunk is None:
+                return
+            tool_calls = _normalized_tool_calls(combined_chunk.get("tool_calls") or [])
+            if not tool_calls:
+                for content in buffered_content:
+                    yield content, [], ""
+                logger.info(
+                    "[PERF] thinking round=%d model=%.2fs total=%.2fs final_answer=%d chars",
+                    round_index + 1,
+                    time.perf_counter() - round_started_at,
+                    time.perf_counter() - stream_started_at,
+                    sum(len(c) for c in buffered_content),
+                )
+                return
+            logger.info(
+                "[PERF] thinking round=%d model=%.2fs tool_calls=%d (accumulated %.2fs)",
+                round_index + 1,
+                time.perf_counter() - round_started_at,
+                len(tool_calls),
+                time.perf_counter() - stream_started_at,
+            )
+            assistant_turn: dict[str, object] = {
+                "role": "assistant",
+                "content": "".join(buffered_content),
+            }
+            raw_calls = combined_chunk.get("tool_calls") or []
+            if raw_calls:
+                assistant_turn["tool_calls"] = [
+                    {
+                        "id": call["id"],
+                        "type": "function",
+                        "function": {"name": call["name"], "arguments": json.dumps(call["args"], ensure_ascii=False)},
+                    }
+                    for call in tool_calls
+                ]
+            messages.append(assistant_turn)
+
+            async def execute_call(call: dict[str, object]) -> ToolOutcome:
+                arguments = call.get("args") if isinstance(call.get("args"), dict) else {}
+                return await self._tools.execute(str(call["name"]), arguments)
+
+            tools_started_at = time.perf_counter()
+            outcomes = list(await asyncio.gather(*(execute_call(call) for call in tool_calls)))
+            logger.info(
+                "[PERF] thinking round=%d tools=%.2fs (%d concurrent)",
+                round_index + 1,
+                time.perf_counter() - tools_started_at,
+                len(outcomes),
+            )
+            for call, outcome in zip(tool_calls, outcomes):
+                messages.append({"role": "tool", "tool_call_id": str(call.get("id", "")), "content": outcome.content})
+            calls = []
+            for call, outcome in zip(tool_calls, outcomes):
+                sources = []
+                for source in outcome.sources:
+                    url = source.get("url")
+                    if url and url in seen_source_urls:
+                        continue
+                    if url:
+                        seen_source_urls.add(url)
+                    sources.append(source)
+                calls.append(to_provider_tool_call(call, sources))
+            yield "", calls, ""
+            round_started_at = time.perf_counter()
+
+    async def _direct_stream_once(
+        self,
+        base_url: str,
+        messages: list[dict[str, object]],
+        request: ChatStreamRequest,
+        tool_definitions: list[dict[str, object]],
+    ) -> AsyncIterator[dict[str, object]]:
+        """One raw SSE pass against the provider's chat/completions endpoint."""
+        body: dict[str, object] = {
+            "model": request.model or self._credentials.model,
+            "messages": messages,
+            "stream": True,
+            "temperature": request.temperature,
+            "thinking": {"type": "enabled"},
+        }
+        if tool_definitions:
+            body["tools"] = tool_definitions
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=30.0)) as client:
+            async with client.stream(
+                "POST",
+                f"{base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self._credentials.api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
+                json=body,
+            ) as response:
+                if response.status_code != 200:
+                    error_body = (await response.aread()).decode("utf-8", "replace")
+                    raise ServiceError(
+                        "PROVIDER_ERROR",
+                        error_body[:500] or f"Provider returned {response.status_code}.",
+                        response.status_code,
+                    )
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[len("data:"):].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        delta = json.loads(data)["choices"][0]["delta"]
+                    except (KeyError, IndexError, json.JSONDecodeError):
+                        continue
+                    yield dict(delta)
+
+
+def _merge_delta(combined: dict[str, object], delta: dict[str, object]) -> dict[str, object]:
+    """Accumulates streamed tool calls (by index) into the round's combined chunk."""
+    merged = dict(combined)
+    calls = list(merged.get("tool_calls") or [])
+    for tool_call in delta.get("tool_calls") or []:
+        index = int(tool_call.get("index", 0))
+        while len(calls) <= index:
+            calls.append({"id": None, "type": "function", "function": {"name": None, "arguments": ""}})
+        accumulated = calls[index]
+        if tool_call.get("id"):
+            accumulated["id"] = tool_call["id"]
+        function = tool_call.get("function") or {}
+        if function.get("name"):
+            accumulated["function"]["name"] = function["name"]
+        if function.get("arguments"):
+            accumulated["function"]["arguments"] += function["arguments"]
+    merged["tool_calls"] = calls
+    return merged
+
+
+def _normalized_tool_calls(raw_calls: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Normalizes accumulated streamed tool calls into {id, name, args} dicts."""
+    calls = []
+    for call in raw_calls:
+        function = call.get("function") or {}
+        name = function.get("name")
+        if not name:
+            continue
+        arguments: dict[str, object] = {}
+        raw = function.get("arguments") or ""
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    arguments = parsed
+            except json.JSONDecodeError:
+                arguments = {}
+        calls.append({"id": call.get("id"), "name": name, "args": arguments})
+    return calls
 
 
 def to_openai_tool(tool: ToolDefinitionInput) -> dict[str, object]:
