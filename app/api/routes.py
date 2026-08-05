@@ -250,16 +250,19 @@ async def persist_message(
 
 
 async def generate_title_in_background(user_id: str, conversation_id: str) -> None:
-    """Titles a brand-new conversation with a model call, then syncs it via the change stream.
+    """Titles a conversation with a model call, then syncs it via the change stream.
 
     Runs detached from the streaming request so the answer is never delayed. A title is only
-    generated for the first turn; failures are swallowed because the title is cosmetic.
+    generated while the conversation still carries the default title; failures are swallowed
+    because the title is cosmetic.
     """
     try:
         async with SessionLocal() as session:
             user = await session.get(User, user_id)
             conversation = await session.get(Conversation, conversation_id)
             if user is None or conversation is None or conversation.user_id != user_id:
+                return
+            if conversation.title not in ("", "New Chat", "New conversation"):
                 return
             messages = list(
                 await session.scalars(
@@ -268,7 +271,8 @@ async def generate_title_in_background(user_id: str, conversation_id: str) -> No
                     .order_by(Message.created_at)
                 )
             )
-            if len(messages) > 2 or not messages or messages[0].role != "user":
+            first_user_message = next((message for message in messages if message.role == "user"), None)
+            if first_user_message is None:
                 return
             credentials = await get_user_model_credentials(session, user_id, None, get_settings())
             model = ChatOpenAI(
@@ -276,7 +280,7 @@ async def generate_title_in_background(user_id: str, conversation_id: str) -> No
                 base_url=credentials.base_url or None,
                 model=credentials.model,
             )
-            title = await generate_conversation_title(model, messages[0].content)
+            title = await generate_conversation_title(model, first_user_message.content)
             if not title:
                 return
             conversation.title = title
