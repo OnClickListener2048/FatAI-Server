@@ -127,15 +127,20 @@ class LangChainChatService:
         seen_source_urls: set[str] = set()
         for round_index in range(MAX_TOOL_ROUNDS):
             combined_chunk = None
+            # Buffer the round's text: rounds that end in tool calls only contain interim
+            # narration ("let me search..."), which must not leak into the answer.
+            buffered_content: list[str] = []
             async for chunk in model.astream(messages):
                 combined_chunk = chunk if combined_chunk is None else combined_chunk + chunk
                 content = chunk.content
                 if isinstance(content, str) and content:
-                    yield content, []
+                    buffered_content.append(content)
             if combined_chunk is None:
                 return
             tool_calls = combined_chunk.tool_calls
             if not tool_calls:
+                for content in buffered_content:
+                    yield content, []
                 return
             # AIMessageChunk has no to_message() in this langchain-core version; rebuild the
             # assistant turn from the normalized tool calls so the next round sees them.
