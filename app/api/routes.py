@@ -112,9 +112,8 @@ async def chat_stream(
     credentials = await get_user_model_credentials(
         session, user.id, payload.model_configuration_id, get_settings()
     )
-    service = LangChainChatService(
-        credentials, ServerToolExecutor(get_search_service(request))
-    )
+    tool_executor = ServerToolExecutor(get_search_service(request)) if get_settings().enable_chat_tools else None
+    service = LangChainChatService(credentials, tool_executor)
     service.ensure_configured()
 
     context_started_at = time.perf_counter()
