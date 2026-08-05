@@ -78,10 +78,14 @@ class ModelConfigurationTest(unittest.TestCase):
 
         asyncio.run(verify())
 
-        async def model_stream(*_args, **_kwargs):
-            yield "hello", []
+        class FakeChunk:
+            content = "hello"
 
-        with patch("app.api.routes.LangChainChatService.stream", model_stream):
+        class FakeModel:
+            async def astream(self, _messages):
+                yield FakeChunk()
+
+        with patch("app.api.routes.ChatOpenAI", return_value=FakeModel()):
             stream_response = self.client.post(
                 "/v1/chat/stream",
                 headers=self.headers,

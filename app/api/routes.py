@@ -109,61 +109,36 @@ async def chat_stream(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> StreamingResponse:
+    """Pure LLM passthrough: auth, credentials, then a direct model stream.
+
+    Deliberately stripped for latency testing: no context assembly, no tools, no persistence,
+    no title generation. The client's messages go straight to the provider.
+    """
     credentials = await get_user_model_credentials(
         session, user.id, payload.model_configuration_id, get_settings()
     )
-    tool_executor = ServerToolExecutor(get_search_service(request)) if get_settings().enable_chat_tools else None
-    service = LangChainChatService(credentials, tool_executor)
-    service.ensure_configured()
-
-    context_started_at = time.perf_counter()
-    context = await assemble_context(
-        session,
-        user,
-        payload.workspace_id,
-        payload.conversation_id,
-        payload.messages,
-        payload.response_language_tag,
-        payload.tool_results,
-        payload.include_contextual_references,
+    model = ChatOpenAI(
+        api_key=credentials.api_key,
+        base_url=credentials.base_url or None,
+        model=payload.model or credentials.model,
+        temperature=payload.temperature,
+        streaming=True,
     )
-    logging.getLogger("fatai.perf").info(
-        "[PERF] credentials+context=%.3fs messages=%d",
-        time.perf_counter() - context_started_at,
-        len(context),
-    )
+    messages = [LangChainChatService._to_langchain_message(message) for message in payload.messages]
 
     async def events() -> AsyncIterator[str]:
-        answer = ""
-        persisted = False
         stream_started_at = time.perf_counter()
         try:
-            async for content, tool_calls in service.stream(payload, context=context):
-                answer += content
-                if content:
+            async for chunk in model.astream(messages):
+                content = chunk.content
+                if isinstance(content, str) and content:
                     yield f"event: message\ndata: {json.dumps({'content': content}, ensure_ascii=False)}\n\n"
-                for tool_call in tool_calls:
-                    yield f"event: tool_call\ndata: {json.dumps(tool_call, ensure_ascii=False)}\n\n"
-            persist_started_at = time.perf_counter()
-            await persist_chat_turn(session, user, payload, answer)
             logging.getLogger("fatai.perf").info(
-                "[PERF] stream=%.2fs persist=%.3fs total=%.2fs answer=%d chars",
+                "[PERF] pure-llm stream=%.2fs",
                 time.perf_counter() - stream_started_at,
-                time.perf_counter() - persist_started_at,
-                time.perf_counter() - stream_started_at,
-                len(answer),
             )
-            persisted = True
-            if payload.conversation_id:
-                _spawn_background(generate_title_in_background(user.id, payload.conversation_id))
         finally:
-            # A disconnected client (stop generation) still leaves its partial answer behind.
-            # shield keeps the persistence running even though the streaming task was cancelled.
-            if not persisted and answer:
-                try:
-                    await asyncio.shield(persist_chat_turn(session, user, payload, answer))
-                except Exception:
-                    pass
+            pass
         yield "event: done\ndata: {}\n\n"
 
     return StreamingResponse(
