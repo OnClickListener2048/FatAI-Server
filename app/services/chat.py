@@ -1,6 +1,8 @@
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
+import asyncio
+
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
@@ -10,7 +12,7 @@ from app.services.model_configurations import UserModelCredentials
 from app.services.search import BingRssSearchService, WeatherService
 
 MAX_TOOL_OUTPUT_CHARACTERS = 24_000
-MAX_TOOL_ROUNDS = 3
+MAX_TOOL_ROUNDS = 2
 
 
 @dataclass
@@ -147,15 +149,20 @@ class LangChainChatService:
             messages.append(
                 AIMessage(content=combined_chunk.content or "", tool_calls=combined_chunk.tool_calls)
             )
-            outcomes = []
-            for call in tool_calls:
+            outcomes: list[ToolOutcome] = []
+
+            async def execute_call(call: dict[str, object]) -> ToolOutcome:
                 raw_arguments = call.get("args", {})
                 arguments = raw_arguments if isinstance(raw_arguments, dict) else {}
-                outcome = await self._tools.execute(str(call["name"]), arguments)
-                outcomes.append((call, outcome))
+                return await self._tools.execute(str(call["name"]), arguments)
+
+            # Run the round's tool calls concurrently (the model often issues two searches),
+            # which roughly halves the searching time.
+            outcomes = list(await asyncio.gather(*(execute_call(call) for call in tool_calls)))
+            for call, outcome in zip(tool_calls, outcomes):
                 messages.append(ToolMessage(content=outcome.content, tool_call_id=str(call.get("id", ""))))
             calls = []
-            for call, outcome in outcomes:
+            for call, outcome in zip(tool_calls, outcomes):
                 sources = []
                 for source in outcome.sources:
                     url = source.get("url")
