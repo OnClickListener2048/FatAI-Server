@@ -5,10 +5,12 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
+from langchain_openai import ChatOpenAI
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.db import Conversation, Message, User, get_session
+from app.db import Conversation, Message, SessionLocal, User, get_session
 from app.models import (
     ChatStreamRequest,
     DocumentReadResponse,
@@ -23,9 +25,19 @@ from app.services.context import assemble_context
 from app.services.documents import DoclingDocumentService
 from app.services.model_configurations import get_user_model_credentials
 from app.services.search import BingRssSearchService, WeatherService
+from app.services.titles import generate_conversation_title
 from app.security import get_current_user
 
 router = APIRouter(prefix="/v1")
+
+# Keeps detached background tasks alive; asyncio otherwise garbage-collects unreferenced tasks.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 def get_search_service(request: Request) -> BingRssSearchService:
@@ -126,6 +138,8 @@ async def chat_stream(
                     yield f"event: tool_call\ndata: {json.dumps(tool_call, ensure_ascii=False)}\n\n"
             await persist_chat_turn(session, user, payload, answer)
             persisted = True
+            if payload.conversation_id:
+                _spawn_background(generate_title_in_background(user.id, payload.conversation_id))
         finally:
             # A disconnected client (stop generation) still leaves its partial answer behind.
             # shield keeps the persistence running even though the streaming task was cancelled.
@@ -233,3 +247,40 @@ async def persist_message(
         record.reasoning_content = reasoning_content
         record.content_type = content_type
     await record_change(session, user, "message", message_id, "UPSERT", entity_payload(record))
+
+
+async def generate_title_in_background(user_id: str, conversation_id: str) -> None:
+    """Titles a brand-new conversation with a model call, then syncs it via the change stream.
+
+    Runs detached from the streaming request so the answer is never delayed. A title is only
+    generated for the first turn; failures are swallowed because the title is cosmetic.
+    """
+    try:
+        async with SessionLocal() as session:
+            user = await session.get(User, user_id)
+            conversation = await session.get(Conversation, conversation_id)
+            if user is None or conversation is None or conversation.user_id != user_id:
+                return
+            messages = list(
+                await session.scalars(
+                    select(Message)
+                    .where(Message.conversation_id == conversation_id)
+                    .order_by(Message.created_at)
+                )
+            )
+            if len(messages) > 2 or not messages or messages[0].role != "user":
+                return
+            credentials = await get_user_model_credentials(session, user_id, None, get_settings())
+            model = ChatOpenAI(
+                api_key=credentials.api_key,
+                base_url=credentials.base_url or None,
+                model=credentials.model,
+            )
+            title = await generate_conversation_title(model, messages[0].content)
+            if not title:
+                return
+            conversation.title = title
+            await record_change(session, user, "conversation", conversation_id, "UPSERT", entity_payload(conversation))
+            await session.commit()
+    except Exception:
+        pass

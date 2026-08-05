@@ -62,7 +62,9 @@ send their own turns and never influence the instruction layers.
 Conversation chats (with `conversation_id` and `assistant_message_id`) are persisted directly:
 the server upserts the conversation when missing, saves the user turn and the assistant answer,
 and records both in the change stream, so the client no longer re-syncs chat messages. A
-disconnected stream still saves whatever was streamed so far.
+disconnected stream still saves whatever was streamed so far. After the first turn of a brand-new
+conversation, the server asynchronously generates a short model-based title (`app/services/titles.py`)
+and syncs it through the same change stream; title failures are silently ignored.
 
 It responds with `Content-Type: text/event-stream`:
 
