@@ -1,5 +1,7 @@
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+import logging
+import time
 
 import asyncio
 
@@ -11,8 +13,12 @@ from app.services.errors import ServiceError
 from app.services.model_configurations import UserModelCredentials
 from app.services.search import BingRssSearchService, WeatherService
 
+logger = logging.getLogger("fatai.perf")
+
 MAX_TOOL_OUTPUT_CHARACTERS = 24_000
 MAX_TOOL_ROUNDS = 2
+# Trail of text held back per round so short tool-round narration can be dropped.
+NARRATION_BUFFER_CHARS = 200
 
 
 @dataclass
@@ -127,23 +133,46 @@ class LangChainChatService:
         # Sources are deduplicated across the whole request (the model may search several
         # rounds and hit the same page twice), not per round.
         seen_source_urls: set[str] = set()
+        stream_started_at = time.perf_counter()
+        round_started_at = time.perf_counter()
         for round_index in range(MAX_TOOL_ROUNDS):
             combined_chunk = None
-            # Buffer the round's text: rounds that end in tool calls only contain interim
-            # narration ("let me search..."), which must not leak into the answer.
+            # Keep a trailing buffer of the round's text: tool-round narration ("let me
+            # search...") is short and gets dropped if the round ends in tool calls, while
+            # a real answer longer than the buffer streams through with a tiny delay.
             buffered_content: list[str] = []
+            buffered_chars = 0
             async for chunk in model.astream(messages):
                 combined_chunk = chunk if combined_chunk is None else combined_chunk + chunk
                 content = chunk.content
                 if isinstance(content, str) and content:
                     buffered_content.append(content)
+                    buffered_chars += len(content)
+                    while buffered_chars > NARRATION_BUFFER_CHARS and buffered_content:
+                        piece = buffered_content.pop(0)
+                        buffered_chars -= len(piece)
+                        yield piece, []
             if combined_chunk is None:
                 return
             tool_calls = combined_chunk.tool_calls
             if not tool_calls:
                 for content in buffered_content:
                     yield content, []
+                logger.info(
+                    "[PERF] round=%d model=%.2fs total=%.2fs final_answer=%d chars",
+                    round_index + 1,
+                    time.perf_counter() - round_started_at,
+                    time.perf_counter() - stream_started_at,
+                    sum(len(c) for c in buffered_content),
+                )
                 return
+            logger.info(
+                "[PERF] round=%d model=%.2fs tool_calls=%d (accumulated %.2fs)",
+                round_index + 1,
+                time.perf_counter() - round_started_at,
+                len(tool_calls),
+                time.perf_counter() - stream_started_at,
+            )
             # AIMessageChunk has no to_message() in this langchain-core version; rebuild the
             # assistant turn from the normalized tool calls so the next round sees them.
             messages.append(
@@ -158,7 +187,14 @@ class LangChainChatService:
 
             # Run the round's tool calls concurrently (the model often issues two searches),
             # which roughly halves the searching time.
+            tools_started_at = time.perf_counter()
             outcomes = list(await asyncio.gather(*(execute_call(call) for call in tool_calls)))
+            logger.info(
+                "[PERF] round=%d tools=%.2fs (%d concurrent)",
+                round_index + 1,
+                time.perf_counter() - tools_started_at,
+                len(outcomes),
+            )
             for call, outcome in zip(tool_calls, outcomes):
                 messages.append(ToolMessage(content=outcome.content, tool_call_id=str(call.get("id", ""))))
             calls = []
@@ -183,11 +219,18 @@ class LangChainChatService:
                     temperature=request.temperature,
                     streaming=True,
                 )
+            round_started_at = time.perf_counter()
 
+        forced_started_at = time.perf_counter()
         async for chunk in model.astream(messages):
             content = chunk.content
             if isinstance(content, str) and content:
                 yield content, []
+        logger.info(
+            "[PERF] final model=%.2fs total=%.2fs (forced answer round)",
+            time.perf_counter() - forced_started_at,
+            time.perf_counter() - stream_started_at,
+        )
 
     @staticmethod
     def _to_langchain_message(message: ChatMessageInput) -> SystemMessage | HumanMessage | AIMessage:

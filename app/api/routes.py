@@ -1,5 +1,7 @@
 import asyncio
 import json
+import logging
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -115,6 +117,7 @@ async def chat_stream(
     )
     service.ensure_configured()
 
+    context_started_at = time.perf_counter()
     context = await assemble_context(
         session,
         user,
@@ -125,10 +128,16 @@ async def chat_stream(
         payload.tool_results,
         payload.include_contextual_references,
     )
+    logging.getLogger("fatai.perf").info(
+        "[PERF] credentials+context=%.3fs messages=%d",
+        time.perf_counter() - context_started_at,
+        len(context),
+    )
 
     async def events() -> AsyncIterator[str]:
         answer = ""
         persisted = False
+        stream_started_at = time.perf_counter()
         try:
             async for content, tool_calls in service.stream(payload, context=context):
                 answer += content
@@ -136,7 +145,15 @@ async def chat_stream(
                     yield f"event: message\ndata: {json.dumps({'content': content}, ensure_ascii=False)}\n\n"
                 for tool_call in tool_calls:
                     yield f"event: tool_call\ndata: {json.dumps(tool_call, ensure_ascii=False)}\n\n"
+            persist_started_at = time.perf_counter()
             await persist_chat_turn(session, user, payload, answer)
+            logging.getLogger("fatai.perf").info(
+                "[PERF] stream=%.2fs persist=%.3fs total=%.2fs answer=%d chars",
+                time.perf_counter() - stream_started_at,
+                time.perf_counter() - persist_started_at,
+                time.perf_counter() - stream_started_at,
+                len(answer),
+            )
             persisted = True
             if payload.conversation_id:
                 _spawn_background(generate_title_in_background(user.id, payload.conversation_id))
