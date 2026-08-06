@@ -167,10 +167,6 @@ class SyncChange(Base):
 engine = create_async_engine(
     get_settings().database_url,
     future=True,
-    connect_args={
-        # WAL mode allows concurrent reads and writes, avoiding "database is locked".
-        "statement_cache_size": 0,
-    },
 )
 
 

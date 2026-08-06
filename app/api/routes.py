@@ -138,6 +138,8 @@ async def chat_stream(
         answer = ""
         persisted = False
         stream_started_at = time.perf_counter()
+        persisted = False
+        persist_error: str | None = None
         try:
             async for content, tool_calls, reasoning in service.stream(payload, context=context):
                 answer += content
@@ -148,26 +150,37 @@ async def chat_stream(
                 for tool_call in tool_calls:
                     yield f"event: tool_call\ndata: {json.dumps(tool_call, ensure_ascii=False)}\n\n"
             persist_started_at = time.perf_counter()
-            await persist_chat_turn(session, user, payload, answer)
-            logging.getLogger("fatai.perf").info(
-                "[PERF] stream=%.2fs persist=%.3fs total=%.2fs answer=%d chars",
-                time.perf_counter() - stream_started_at,
-                time.perf_counter() - persist_started_at,
-                time.perf_counter() - stream_started_at,
-                len(answer),
-            )
-            persisted = True
-            if payload.conversation_id:
-                _spawn_background(generate_title_in_background(user.id, payload.conversation_id))
+            try:
+                await persist_chat_turn(session, user, payload, answer)
+                persisted = True
+                logging.getLogger("fatai.perf").info(
+                    "[PERF] stream=%.2fs persist=%.3fs total=%.2fs answer=%d chars",
+                    time.perf_counter() - stream_started_at,
+                    time.perf_counter() - persist_started_at,
+                    time.perf_counter() - stream_started_at,
+                    len(answer),
+                )
+                if payload.conversation_id:
+                    _spawn_background(generate_title_in_background(user.id, payload.conversation_id))
+            except Exception as exc:
+                persist_error = f"{type(exc).__name__}: {exc}"
+                logging.getLogger("fatai.perf").warning(
+                    "[PERF] persist failed: %s", persist_error
+                )
         finally:
             # A disconnected client (stop generation) still leaves its partial answer behind.
             # shield keeps the persistence running even though the streaming task was cancelled.
             if not persisted and answer:
                 try:
                     await asyncio.shield(persist_chat_turn(session, user, payload, answer))
+                    persisted = True
+                    persist_error = None
                 except Exception:
                     pass
-        yield "event: done\ndata: {}\n\n"
+        done_payload: dict[str, object] = {"persisted": persisted}
+        if persist_error:
+            done_payload["persist_error"] = persist_error
+        yield f"event: done\ndata: {json.dumps(done_payload, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         events(),
