@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime
 
+import sqlalchemy
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -163,7 +164,25 @@ class SyncChange(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-engine = create_async_engine(get_settings().database_url, future=True)
+engine = create_async_engine(
+    get_settings().database_url,
+    future=True,
+    connect_args={
+        # WAL mode allows concurrent reads and writes, avoiding "database is locked".
+        "statement_cache_size": 0,
+    },
+)
+
+
+@sqlalchemy.event.listens_for(engine.sync_engine, "connect")
+def _set_sqlite_pragma(dbapi_connection, _connection_record):
+    """Enable WAL journal and a 5 s busy timeout on every new SQLite connection."""
+    import sqlite3
+    if isinstance(dbapi_connection, sqlite3.Connection):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.execute("PRAGMA busy_timeout=5000;")
+        cursor.close()
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
