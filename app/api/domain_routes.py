@@ -21,6 +21,7 @@ from app.models import (
     SyncOperationInput,
     SyncOperationResponse,
     SyncSnapshotResponse,
+    ToolDefinitionInput,
 )
 from app.db import (
     AppSetting,
@@ -113,6 +114,10 @@ class SettingInput(BaseModel):
     value: str = Field(max_length=20_000)
 
 
+class MemoryUpdateInput(BaseModel):
+    content: str = Field(min_length=1, max_length=4096)
+
+
 class ModelConfigurationInput(BaseModel):
     id: str = Field(min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=160)
@@ -126,6 +131,21 @@ class ModelConfigurationInput(BaseModel):
 class AgentRunInput(BaseModel):
     messages: list[ChatMessageInput] = Field(min_length=1)
     model: str | None = Field(default=None, max_length=256)
+    system_prompt: str | None = Field(default=None, max_length=8192)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    tools: list[ToolDefinitionInput] | None = Field(default=None)
+    require_approval: bool = False
+
+
+class AgentContinueInput(BaseModel):
+    """Resume an agent run after the user approved/rejected tool calls."""
+    messages: list[ChatMessageInput] = Field(min_length=1)
+    model: str | None = Field(default=None, max_length=256)
+    system_prompt: str | None = Field(default=None, max_length=8192)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    tools: list[ToolDefinitionInput] | None = Field(default=None)
+    require_approval: bool = False
+    approved_tool_ids: list[str] = Field(default_factory=list)
 
 
 def entity_payload(entity: object) -> dict:
@@ -687,14 +707,25 @@ async def run_agent(payload: AgentRunInput, user: CurrentUser, session: Session)
 
 
 @router.get("/memories")
-async def list_memories(user: CurrentUser, session: Session, workspace_id: str | None = None, conversation_id: str | None = None) -> list[dict]:
+async def list_memories(user: CurrentUser, session: Session, workspace_id: str | None = None, conversation_id: str | None = None, scope: str | None = None) -> list[dict]:
     query = select(MemoryEntry).where(MemoryEntry.user_id == user.id, MemoryEntry.is_archived.is_(False))
     if workspace_id:
         query = query.where(MemoryEntry.workspace_id == workspace_id)
     if conversation_id:
         query = query.where(MemoryEntry.conversation_id == conversation_id)
+    if scope:
+        query = query.where(MemoryEntry.scope == scope)
     records = await session.scalars(query.order_by(MemoryEntry.updated_at.desc()))
-    return [entity_payload(item) for item in records]
+    result = []
+    for item in records:
+        entry = entity_payload(item)
+        entry["source_conversation_title"] = None
+        if item.conversation_id:
+            conv = await session.scalar(select(Conversation).where(Conversation.id == item.conversation_id))
+            if conv:
+                entry["source_conversation_title"] = conv.title
+        result.append(entry)
+    return result
 
 
 @router.post("/memories", status_code=status.HTTP_201_CREATED)
@@ -715,6 +746,27 @@ async def archive_memory(memory_id: str, user: CurrentUser, session: Session) ->
     await record_change(session, user, "memory", record.id, "UPSERT", entity_payload(record))
     await session.commit()
     return entity_payload(record)
+
+
+@router.patch("/memories/{memory_id}")
+async def update_memory(memory_id: str, payload: MemoryUpdateInput, user: CurrentUser, session: Session) -> dict:
+    record = await owned_or_404(session, MemoryEntry, memory_id, user.id)
+    record.content = payload.content
+    await record_change(session, user, "memory", record.id, "UPSERT", entity_payload(record))
+    await session.commit()
+    return entity_payload(record)
+
+
+@router.post("/memories/clear")
+async def clear_memories(user: CurrentUser, session: Session) -> dict:
+    records = await session.scalars(
+        select(MemoryEntry).where(MemoryEntry.user_id == user.id, MemoryEntry.is_archived.is_(False))
+    )
+    for record in records:
+        record.is_archived = True
+        await record_change(session, user, "memory", record.id, "UPSERT", entity_payload(record))
+    await session.commit()
+    return {"cleared": True}
 
 
 @router.get("/prompt-templates")
