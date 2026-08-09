@@ -1,13 +1,11 @@
 import asyncio
 import os
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-_temp_directory = tempfile.TemporaryDirectory()
-_database_path = Path(_temp_directory.name) / "verification.db"
-os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_database_path.as_posix()}"
+from tests import _test_db
+
+os.environ["DATABASE_URL"] = _test_db.DATABASE_URL
 
 from fastapi.testclient import TestClient
 
@@ -20,11 +18,6 @@ from app.services.model_configurations import UserModelCredentials, decrypt_api_
 
 
 class ModelConfigurationTest(unittest.TestCase):
-    @classmethod
-    def tearDownClass(cls) -> None:
-        asyncio.run(engine.dispose())
-        _temp_directory.cleanup()
-
     def setUp(self) -> None:
         self.client = TestClient(create_app())
         self.client.__enter__()

@@ -1,4 +1,5 @@
 import asyncio
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,10 @@ from pathlib import Path
 # (ContextRetrievalTest 排在 VectorStoreTest 之前)导致的提前删除。
 _temp_directory = tempfile.TemporaryDirectory()
 _VECTOR_DB_URL = f"sqlite+aiosqlite:///{(Path(_temp_directory.name) / 'rag_vec.db').as_posix()}"
+
+from tests import _test_db  # noqa: E402
+
+os.environ["DATABASE_URL"] = _test_db.DATABASE_URL  # noqa: E402
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine  # noqa: E402
 

@@ -84,7 +84,7 @@ curl.exe -X POST http://127.0.0.1:8080/v1/auth/register `
 | 持久化对话     | `POST /v1/conversations/{id}/generate`：服务端组合提示词、记忆和已保存消息后，以 SSE 返回回复并保存助手消息。                          |
 | Agent          | `POST /v1/agents/run`：运行当前基础 LangGraph 模型节点。                                                                               |
 | 记忆与提示词   | `GET`/`POST /v1/memories`、`POST /v1/memories/{id}/archive`、`GET`/`POST /v1/prompt-templates`                                         |
-| 文件与知识库   | `POST /v1/files` 上传文件；`POST /v1/knowledge/documents/{file_id}` 入队处理；`GET /v1/knowledge/documents/{file_id}` 查询状态；`POST /v1/knowledge/documents/{file_id}/retry` 重新入队失败的文档。 |
+| 文件与知识库   | `POST /v1/files` 上传文件（本地目录模拟对象存储）；`POST /v1/files/{file_id}/read` 按 `file_id` 把已存文件转 Markdown（客户端无需再传本地路径）；`POST /v1/knowledge/documents/{file_id}` 入队处理；`GET /v1/knowledge/documents/{file_id}` 查询状态；`POST /v1/knowledge/documents/{file_id}/retry` 重新入队失败的文档。 |
 | 设置           | `GET`/`PUT /v1/settings/{key}`                                                                                                         |
 
 `POST /v1/chat/stream` 与会话生成接口均以 `text/event-stream` 返回 `message`、可选 `tool_call` 和最终 `done` 事件。`done` 携带 `{"sources": [...]}`，即本次回答引用的 RAG 来源（`{title, kind, id}`，`kind` 为 `memory` 或 `knowledge_document`）。详尽的请求体、响应模型和可交互调试入口请使用 `/docs`。

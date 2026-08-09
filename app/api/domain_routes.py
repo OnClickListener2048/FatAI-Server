@@ -17,6 +17,7 @@ from app.core.config import get_settings
 from app.models import (
     ChatMessageInput,
     ChatStreamRequest,
+    DocumentReadResponse,
     SyncChangeResponse,
     SyncChangesResponse,
     SyncOperationInput,
@@ -848,6 +849,26 @@ async def upload_file(
     await session.commit()
     await session.refresh(record)
     return entity_payload(record)
+
+
+@router.post("/files/{file_id}/read", response_model=DocumentReadResponse)
+async def read_uploaded_document(
+    file_id: str,
+    user: CurrentUser,
+    session: Session,
+    request: Request,
+) -> DocumentReadResponse:
+    """把已上传的文件资产转换为 Markdown(对象存储引用语义: 客户端只持 file_id)。
+
+    与 /v1/tools/document-read 的区别: 该端点要求鉴权并从服务端存储读取文件,
+    客户端无需再向服务端暴露本地路径。
+    """
+    asset = await owned_or_404(session, FileAsset, file_id, user.id)
+    path = Path(asset.storage_path)
+    if not path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The uploaded file has been removed from storage.")
+    document_service = request.app.state.document_service
+    return await document_service.read(asset.display_name, asset.mime_type, path.read_bytes())
 
 
 @router.post("/knowledge/documents/{file_id}", status_code=status.HTTP_202_ACCEPTED)

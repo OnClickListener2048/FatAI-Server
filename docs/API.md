@@ -114,7 +114,8 @@ Conversation creation requires `workspace_id`, `model`, and optionally `id`, `ti
 | `GET`, `POST` | `/v1/memories` | List or create memories. |
 | `POST` | `/v1/memories/{id}/archive` | Archive a memory. |
 | `GET`, `POST` | `/v1/prompt-templates` | List or create prompt templates. |
-| `POST` | `/v1/files` | Upload a file as `multipart/form-data` with a `file` part. |
+| `POST` | `/v1/files` | Upload a file as `multipart/form-data` with a `file` part; returns the stored asset (`id`, `display_name`, `storage_path`, …). |
+| `POST` | `/v1/files/{file_id}/read` | Convert a stored upload to Markdown via Docling; authenticated, server-side read by `file_id` (S3-like reference semantics). |
 | `POST` | `/v1/knowledge/documents/{file_id}` | Queue an uploaded file for knowledge processing (status transitions `QUEUED` → `PROCESSING` → `READY`/`FAILED`). |
 | `GET` | `/v1/knowledge/documents/{file_id}` | Return the processing status and error message of a knowledge document. |
 | `POST` | `/v1/knowledge/documents/{file_id}/retry` | Re-queue a `FAILED` knowledge document. |
