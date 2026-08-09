@@ -118,7 +118,7 @@ async def chat_stream(
     service.ensure_configured()
 
     context_started_at = time.perf_counter()
-    context = await assemble_context(
+    context, sources = await assemble_context(
         session,
         user,
         payload.workspace_id,
@@ -127,6 +127,7 @@ async def chat_stream(
         payload.response_language_tag,
         payload.tool_results,
         payload.include_contextual_references,
+        retriever=getattr(request.app.state, "rag_retriever", None),
     )
     logging.getLogger("fatai.perf").info(
         "[PERF] credentials+context=%.3fs messages=%d",
@@ -167,7 +168,7 @@ async def chat_stream(
                     await asyncio.shield(persist_chat_turn(session, user, payload, answer))
                 except Exception:
                     pass
-        yield "event: done\ndata: {}\n\n"
+        yield "event: done\ndata: " + json.dumps({"sources": sources}, ensure_ascii=False) + "\n\n"
 
     return StreamingResponse(
         events(),

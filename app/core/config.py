@@ -24,6 +24,18 @@ class Settings(BaseSettings):
     upload_directory: str = "data/uploads"
     allow_local_document_paths: bool = True
 
+    # RAG: OpenAI-compatible embedding endpoint (local Ollama by default, hosted BYOK for production)
+    embedding_base_url: str = "http://127.0.0.1:11434/v1"
+    embedding_api_key: str = "ollama"
+    embedding_model: str = "bge-m3"
+    embedding_dimensions: int = Field(default=1024, ge=64, le=8192)
+    rag_top_k_memory: int = Field(default=8, ge=1, le=50)
+    rag_top_k_document: int = Field(default=5, ge=1, le=50)
+    rag_min_score: float = Field(default=0.45, ge=0, le=1)
+    rag_chunk_chars: int = Field(default=800, ge=100, le=10_000)
+    rag_chunk_overlap: int = Field(default=120, ge=0, le=2_000)
+    rag_sweep_seconds: float = Field(default=5.0, gt=0, le=3600)
+
 
 @lru_cache
 def get_settings() -> Settings:
