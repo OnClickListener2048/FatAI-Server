@@ -6,3 +6,4 @@ __pycache__/
 data/
 fat_ai.db
 server.log
+fat_ai.db-*
