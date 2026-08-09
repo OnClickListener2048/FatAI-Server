@@ -1,14 +1,18 @@
-"""向量存储与检索。
+"""向量 + 稀疏(BM25)混合存储与检索。
 
 持有到 fat_ai.db 的专用 sqlite3 连接(不走 SQLAlchemy —— aiosqlite 的
 load_extension 是协程,无法在 connect 事件里同步加载)。所有操作经
 asyncio.to_thread 在连接所属线程内完成;每次操作打开独立连接,
 WAL + busy_timeout 与主引擎共存。
 
-两张表:
+三张表:
 - document_chunks: chunk 元数据(作用域、来源、内容),所有模式下都需要
 - chunks_vec0: sqlite-vec vec0 虚拟表,ANN 检索;扩展不可用时退化为
-  BLOB + Python 余弦扫描(与 scripts/rag_demo.py 相同的朴素实现)
+  BLOB + Python 余弦扫描
+- chunk_fts: FTS5 倒排索引,中文经 jieba 分词后写入,提供 BM25 稀疏检索;
+  FTS5 不可用时 bm25_search 返回空(检索层自然退化为纯向量路)
+
+混合融合(RRF)在 RetrievalService 完成,本类只提供两路独立检索。
 """
 
 import asyncio
@@ -77,6 +81,18 @@ def pack_embedding(vector: list[float]) -> bytes:
     return struct.pack(f"{len(vector)}f", *vector)
 
 
+def _tokenize(text: str) -> str:
+    """jieba 分词后拼成 FTS5 MATCH 查询串。
+
+    写入与查询共用同一分词逻辑; 每个词加引号避免 FTS 语法字符
+    (引号/括号等)导致查询报错。
+    """
+    import jieba
+
+    tokens = [token.strip() for token in jieba.cut(text) if token.strip()]
+    return " ".join(f'"{token}"' for token in tokens)
+
+
 def unpack_embedding(blob: bytes) -> list[float]:
     return list(struct.unpack(f"{len(blob) // 4}f", blob))
 
@@ -88,6 +104,7 @@ class VectorStore:
         self._path = sqlite_path_from_url(database_url)
         self._dimensions = dimensions
         self._vec_available = False
+        self._fts_available = False
         self._enabled = self._path is not None
 
     @property
@@ -143,6 +160,20 @@ class VectorStore:
             except Exception:
                 # 扩展不可用(平台不支持/未安装)时退化为 BLOB 余弦扫描
                 self._vec_available = False
+            try:
+                conn.execute(
+                    """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
+                        content,
+                        id UNINDEXED,
+                        user_id UNINDEXED
+                    )
+                    """
+                )
+                self._fts_available = True
+            except Exception:
+                # FTS5 不可用(极少数构建)时稀疏路返回空, 检索退化为纯向量
+                self._fts_available = False
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path, timeout=30)
@@ -196,9 +227,11 @@ class VectorStore:
         embeddings: list[list[float]],
     ) -> None:
         with self._opened() as conn:
-            # 先删 vec0 再删 document_chunks: 子查询依赖 document_chunks 仍持有旧行
+            # 先删 vec0/FTS 再删 document_chunks: 子查询依赖 document_chunks 仍持有旧行
             if self._vec_available:
                 conn.execute("DELETE FROM chunks_vec0 WHERE chunk_id IN (SELECT id FROM document_chunks WHERE source_type = ? AND source_id = ?)", (source_type, source_id))
+            if self._fts_available:
+                self._delete_fts_rows(conn, source_type, source_id)
             conn.execute("DELETE FROM document_chunks WHERE source_type = ? AND source_id = ?", (source_type, source_id))
             for chunk, vector in zip(chunks, embeddings):
                 values = asdict(chunk)
@@ -220,6 +253,21 @@ class VectorStore:
                         "UPDATE document_chunks SET embedding = ? WHERE id = ?",
                         (pack_embedding(vector), chunk.id),
                     )
+                if self._fts_available:
+                    conn.execute(
+                        "INSERT INTO chunk_fts (content, id, user_id) VALUES (?, ?, ?)",
+                        (_tokenize(chunk.content), chunk.id, chunk.user_id),
+                    )
+
+    @staticmethod
+    def _delete_fts_rows(conn: sqlite3.Connection, source_type: str, source_id: str) -> None:
+        """FTS5 只支持按 rowid 删除, 先查出目标行的 rowid 再逐行删。"""
+        rowids = conn.execute(
+            "SELECT rowid FROM chunk_fts WHERE id IN (SELECT id FROM document_chunks WHERE source_type = ? AND source_id = ?)",
+            (source_type, source_id),
+        ).fetchall()
+        for (rowid,) in rowids:
+            conn.execute("DELETE FROM chunk_fts WHERE rowid = ?", (rowid,))
 
     async def delete_by_source(self, source_type: str, source_id: str) -> None:
         if not self._enabled:
@@ -233,6 +281,8 @@ class VectorStore:
                     "DELETE FROM chunks_vec0 WHERE chunk_id IN (SELECT id FROM document_chunks WHERE source_type = ? AND source_id = ?)",
                     (source_type, source_id),
                 )
+            if self._fts_available:
+                self._delete_fts_rows(conn, source_type, source_id)
             conn.execute("DELETE FROM document_chunks WHERE source_type = ? AND source_id = ?", (source_type, source_id))
 
     # ------------------------------------------------------------------
@@ -272,6 +322,30 @@ class VectorStore:
                 key=lambda item: item.score,
                 reverse=True,
             )
+
+    # ------------------------------------------------------------------
+    # 稀疏检索(BM25)
+    # ------------------------------------------------------------------
+    async def bm25_search(self, query_text: str, user_id: str, k: int) -> list[ScoredChunk]:
+        """jieba 分词 + FTS5 BM25 关键词检索; FTS5 不可用时返回空。"""
+        if not self._enabled or not self._fts_available:
+            return []
+        return await asyncio.to_thread(self._bm25_search_sync, query_text, user_id, k)
+
+    def _bm25_search_sync(self, query_text: str, user_id: str, k: int) -> list[ScoredChunk]:
+        match = _tokenize(query_text)
+        if not match:
+            return []
+        with self._opened() as conn:
+            rows = conn.execute(
+                "SELECT id, bm25(chunk_fts) FROM chunk_fts WHERE chunk_fts MATCH ? AND user_id = ? ORDER BY rank LIMIT ?",
+                (match, user_id, k),
+            ).fetchall()
+            if not rows:
+                return []
+            chunks = self._fetch_chunks(conn, [row[0] for row in rows])
+            # score 为 bm25() 原值(负值,越大越相关); 混合融合只使用排名
+            return [ScoredChunk(chunk=chunks[chunk_id], score=score) for chunk_id, score in rows if chunk_id in chunks]
 
     def _fetch_chunks(self, conn: sqlite3.Connection, chunk_ids: list[str]) -> dict[str, ChunkRecord]:
         if not chunk_ids:

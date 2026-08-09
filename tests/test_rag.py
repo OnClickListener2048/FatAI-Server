@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.db import Base, MemoryEntry, User  # noqa: E402
 from app.models import ChatMessageInput  # noqa: E402
 from app.services.context import assemble_context  # noqa: E402
-from app.services.rag.chunking import chunk_markdown, chunk_text  # noqa: E402
+from app.services.rag.chunking import chunk_markdown, chunk_text, semantic_breakpoints  # noqa: E402
 from app.services.rag.retrieval import RetrievalHit, RetrievalResult, RetrievalService  # noqa: E402
 from app.services.rag.vectorstore import ChunkRecord, VectorStore, content_hash  # noqa: E402
 
@@ -26,6 +26,28 @@ class _FixedEmbedder:
 
     async def embed_one(self, _text: str) -> list[float]:
         return list(QUERY_VECTOR)
+
+
+class _SimilarityEmbedder:
+    """语义分块用: 按句子首字分组返回正交向量(同组相似, 异组无关)。"""
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        groups = {"工": 0, "其": 1}
+        vectors = []
+        for text in texts:
+            index = groups.get(text.strip()[:1], 2)
+            vectors.append([1.0 if i == index else 0.0 for i in range(3)])
+        return vectors
+
+
+class _ControlledEmbedder:
+    """混合检索用: 指定文本返回指定向量, 其余返回 QUERY_VECTOR。"""
+
+    def __init__(self, vectors_by_content: dict[str, list[float]]) -> None:
+        self._vectors = vectors_by_content
+
+    async def embed_one(self, text: str) -> list[float]:
+        return list(self._vectors.get(text, QUERY_VECTOR))
 
 
 def _chunk(
@@ -58,25 +80,50 @@ def _chunk(
 class ChunkerTest(unittest.TestCase):
     def test_heading_path_prefixes_chunks(self) -> None:
         md = "# 记忆系统\n\n记忆系统介绍。\n\n## 记忆提取\n\n提取协议内容。"
-        chunks = chunk_markdown(md)
+        chunks = asyncio.run(chunk_markdown(md, _SimilarityEmbedder()))
         self.assertEqual(len(chunks), 2)
         self.assertEqual(chunks[0]["path"], "记忆系统")
         self.assertIn("记忆系统介绍", chunks[0]["content"])
         self.assertEqual(chunks[1]["path"], "记忆系统 > 记忆提取")
 
-    def test_long_section_split_with_overlap(self) -> None:
+    def test_semantic_breakpoints_choose_lowest_similarity(self) -> None:
+        # 4 句、目标 2 块 → 1 个断点, 应落在相似度最低的边界(1 与 2 之间)
+        breaks = semantic_breakpoints([0.9, 0.1, 0.9], [50, 50, 50, 50], max_chars=100, target_chars=50)
+        self.assertEqual(breaks, {1})
+
+    def test_semantic_breakpoints_never_split_high_similarity(self) -> None:
+        # 文本高度连续: 即使目标需要 3 个断点, 高于阈值的边界也绝不断开
+        breaks = semantic_breakpoints([0.95, 0.97, 0.96], [50, 50, 50, 50], max_chars=100, target_chars=50)
+        self.assertEqual(breaks, set())
+
+    def test_semantic_split_at_similarity_drop(self) -> None:
+        # 两组内容: 组内相似(首字"工"/"其"), 组间无关 → 断点落在组间边界
+        md = "# 主题\n\n" + "工作相关内容句子。" * 20 + "其他完全不同的句子。" * 20
+        chunks = asyncio.run(chunk_markdown(md, _SimilarityEmbedder(), max_chars=100))
+        self.assertEqual(len(chunks), 2)
+        self.assertIn("工作相关内容句子", chunks[0]["content"])
+        self.assertIn("其他完全不同的句子", chunks[1]["content"])
+        self.assertNotIn("其他完全不同", chunks[0]["content"])
+
+    def test_long_uniform_text_falls_back_to_sentence_window(self) -> None:
+        # 内容高度连续(无处语义断开)但远超上限 → 句子滑窗兜底, 不产生超大单块
+        md = "# 主题\n\n" + "连续的重复文本内容。" * 30
+        chunks = asyncio.run(chunk_markdown(md, _SimilarityEmbedder(), max_chars=100))
+        self.assertGreater(len(chunks), 1)
+        self.assertLessEqual(len(chunks[0]["content"]), 100 + 10)
+
+    def test_long_text_splits_at_sentence_boundaries(self) -> None:
         text = "。".join(f"句子{i}" for i in range(200))
-        chunks = chunk_text(text, max_chars=200, overlap_chars=40)
+        chunks = chunk_text(text, max_chars=200)
         self.assertGreater(len(chunks), 1)
         for chunk in chunks:
-            self.assertLessEqual(len(chunk), 200 + 40)
-        # 重叠区应包含上一块尾部的内容(句子边界截断,不完全相等但存在共享片段)
-        self.assertNotEqual(chunks[0], chunks[1])
-        self.assertIn(chunks[1][:10], text)
+            self.assertLessEqual(len(chunk), 200 + 10)  # 只允许最后一块略超(句末残留)
+        # 分句保留句末标点,拼接后应完整还原原文(无字符丢失)
+        self.assertEqual("".join(chunks), text)
 
     def test_short_sections_merged(self) -> None:
         md = "# 标题\n\n短句。\n\n另一短句。"
-        chunks = chunk_markdown(md, max_chars=800)
+        chunks = asyncio.run(chunk_markdown(md, _SimilarityEmbedder(), max_chars=800))
         self.assertEqual(len(chunks), 1)
         self.assertIn("短句", chunks[0]["content"])
         self.assertIn("另一短句", chunks[0]["content"])
@@ -88,7 +135,7 @@ class VectorStoreTest(unittest.TestCase):
         self.store.initialize()
 
     def tearDown(self) -> None:
-        for source_id in ("mem-1", "mem-2", "mem-x", "mem-ortho", "mem-half"):
+        for source_id in ("mem-1", "mem-2", "mem-x", "mem-ortho", "mem-half", "mem-bm25"):
             asyncio.run(self.store.delete_by_source("memory", source_id))
 
     async def _seed(self) -> None:
@@ -161,6 +208,39 @@ class VectorStoreTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    async def _seed_bm25(self) -> None:
+        await self.store.replace_source(
+            "memory",
+            "mem-bm25",
+            [_chunk("u1", "memory", "mem-bm25", "用户每天早上九点开始工作。", "GLOBAL")],
+            [list(QUERY_VECTOR)],
+        )
+
+    def test_bm25_chinese_token_search(self) -> None:
+        async def run() -> None:
+            await self._seed_bm25()
+            hits = await self.store.bm25_search("九点开始工作", "u1", k=5)
+            self.assertEqual([hit.chunk.source_id for hit in hits], ["mem-bm25"])
+
+        asyncio.run(run())
+
+    def test_bm25_user_isolation(self) -> None:
+        async def run() -> None:
+            await self._seed_bm25()
+            hits = await self.store.bm25_search("九点开始工作", "u2", k=5)
+            self.assertEqual(hits, [])
+
+        asyncio.run(run())
+
+    def test_bm25_disabled_when_fts_unavailable(self) -> None:
+        async def run() -> None:
+            self.store._fts_available = False  # 模拟 FTS5 不可用
+            await self._seed_bm25()
+            hits = await self.store.bm25_search("九点", "u1", k=5)
+            self.assertEqual(hits, [])
+
+        asyncio.run(run())
+
     def test_scan_fallback_mode(self) -> None:
         async def run() -> None:
             self.store._vec_available = False  # 模拟 sqlite-vec 不可用
@@ -189,6 +269,7 @@ class RetrievalScopeTest(unittest.TestCase):
             ("memory", "w1"),
             ("memory", "w2"),
             ("memory", "c"),
+            ("memory", "hybrid-kw"),
             ("knowledge_document", "doc1"),
             ("knowledge_document", "doc2"),
         ):
@@ -226,6 +307,23 @@ class RetrievalScopeTest(unittest.TestCase):
                     {"title": "", "kind": "memory", "id": "w1"},
                 ],
             )
+
+        asyncio.run(run())
+
+    def test_hybrid_bm25_recalls_keyword_below_semantic_threshold(self) -> None:
+        """关键词精确匹配的 chunk 向量分低于 min_score 时, BM25 路仍能召回。"""
+        async def run() -> None:
+            ortho = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            await self.store.replace_source(
+                "memory",
+                "hybrid-kw",
+                [_chunk("u1", "memory", "hybrid-kw", "用户每天早上九点开始工作。", "GLOBAL")],
+                [ortho],  # 与查询向量正交 → 语义分 0.0, 被 min_score 过滤
+            )
+            result = await self.service.search("九点开始工作", "u1", None, None)
+            self.assertEqual([hit.source_id for hit in result.memories], ["hybrid-kw"])
+            # RRF 分数 = 1/(k + rank) = 1/61
+            self.assertAlmostEqual(result.memories[0].score, 1.0 / 61.0, places=6)
 
         asyncio.run(run())
 

@@ -23,7 +23,7 @@ from app.services.rag.vectorstore import ChunkRecord, VectorStore, content_hash
 
 logger = logging.getLogger("fatai.rag")
 
-EMBED_BATCH = 8  # CPU 推理时一次嵌入条数(与学习脚本一致)
+EMBED_BATCH = 8  # CPU 推理时一次嵌入条数
 
 
 class IndexingService:
@@ -33,13 +33,11 @@ class IndexingService:
         store: VectorStore,
         documents: DoclingDocumentService,
         chunk_chars: int = 800,
-        chunk_overlap: int = 120,
     ) -> None:
         self._embedder = embedder
         self._store = store
         self._documents = documents
         self._chunk_chars = chunk_chars
-        self._chunk_overlap = chunk_overlap
 
     # ------------------------------------------------------------------
     # 记忆
@@ -54,7 +52,7 @@ class IndexingService:
                 return
             chunks = [
                 {"path": "", "content": piece}
-                for piece in chunk_text(memory.content, self._chunk_chars, self._chunk_overlap)
+                for piece in chunk_text(memory.content, self._chunk_chars)
             ]
         records, vectors = await self._embed_chunks("memory", memory, chunks)
         await self._store.replace_source("memory", memory.id, records, vectors)
@@ -121,7 +119,8 @@ class IndexingService:
 
             result = await self._documents.read(display_name, mime_type, content_bytes)
             markdown = result.markdown
-            chunks = chunk_markdown(markdown, self._chunk_chars, self._chunk_overlap)
+            # 语义分块内部会调用 embedder 做句子级嵌入
+            chunks = await chunk_markdown(markdown, self._embedder, self._chunk_chars)
 
             async with SessionLocal() as session:
                 document = await session.get(KnowledgeDocument, document_id)

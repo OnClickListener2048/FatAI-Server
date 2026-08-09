@@ -33,7 +33,6 @@ class Settings(BaseSettings):
     rag_top_k_document: int = Field(default=5, ge=1, le=50)
     rag_min_score: float = Field(default=0.45, ge=0, le=1)
     rag_chunk_chars: int = Field(default=800, ge=100, le=10_000)
-    rag_chunk_overlap: int = Field(default=120, ge=0, le=2_000)
     rag_sweep_seconds: float = Field(default=5.0, gt=0, le=3600)
 
 

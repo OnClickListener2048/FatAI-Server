@@ -47,7 +47,6 @@ async def lifespan(app: FastAPI):
         vector_store,
         app.state.document_service,
         chunk_chars=settings.rag_chunk_chars,
-        chunk_overlap=settings.rag_chunk_overlap,
     )
     app.state.rag_vector_store = vector_store
     app.state.rag_indexer = indexer

@@ -20,4 +20,5 @@ dependencies = [
     "asyncpg>=0.29,<1",
     "uvicorn[standard]>=0.30,<1",
     "sqlite-vec>=0.1.9",
+    "jieba>=0.42.1",
 ]

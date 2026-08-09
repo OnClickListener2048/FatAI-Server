@@ -8,8 +8,8 @@ FatAI 的 FastAPI 后端，提供工具调用、流式 AI 对话、用户认证�
 - 用户自带密钥（BYOK）的 OpenAI 兼容模型 Server-Sent Events（SSE）流式聊天，以及基于 LangGraph 的基础 Agent 运行入口。
 - JWT 用户认证，支持邮箱注册/登录和桌面端迁移期间的设备账号初始化。
 - 按用户隔离的工作区、会话、消息、记忆、提示词模板与应用设置同步。
-- 文件上传与知识库文档处理：入队后由后台 worker 调用 Docling 解析为 Markdown，分块并建立向量索引。
-- 服务端 RAG：记忆与知识文档在写入/变更时异步索引（本地 bge-m3 嵌入、sqlite-vec 向量检索，不可用时退化为余弦扫描），聊天时按语义召回相关记忆与文档片段注入上下文，并在 `done` 事件中返回引用来源。
+- 文件上传与知识库文档处理：入队后由后台 worker 调用 Docling 解析为 Markdown，语义分块并建立索引。
+- 服务端 RAG：记忆与知识文档在写入/变更时异步索引（本地 bge-m3 嵌入；语义分块按句子相似度断句），聊天时混合检索（sqlite-vec 向量 + jieba/FTS5 BM25 关键词，RRF 融合，扩展不可用自动降级）召回相关记忆与文档片段注入上下文，并在 `done` 事件中返回引用来源。
 
 ## 快速开始
 
@@ -41,7 +41,7 @@ uv run python main.py
 | `ALLOW_LOCAL_DOCUMENT_PATHS` | 仅为本地桌面端迁移保留 JSON `localPath` 读取；部署到远程环境前设为 `false`。 |
 | `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` | 嵌入服务（OpenAI 兼容 `POST /embeddings`），默认本地 Ollama `http://127.0.0.1:11434/v1` + `bge-m3`（1024 维）。 |
 | `RAG_TOP_K_MEMORY` / `RAG_TOP_K_DOCUMENT` / `RAG_MIN_SCORE` | 检索召回数与相似度阈值（默认 8 / 5 / 0.45）。 |
-| `RAG_CHUNK_CHARS` / `RAG_CHUNK_OVERLAP` | 文档分块大小与重叠（默认 800 / 120 字符）。 |
+| `RAG_CHUNK_CHARS` | 语义分块的最大块大小（默认 800 字符；目标块约为其 70%）。 |
 | `RAG_SWEEP_SECONDS` | 知识文档 worker 轮询间隔（默认 5 秒）。 |
 
 ## 依赖与职责
@@ -63,6 +63,7 @@ uv run python main.py
 | [SQLAlchemy](https://github.com/sqlalchemy/sqlalchemy) | 定义用户、会话、消息、文件等模型，并提供异步数据库会话。 |
 | [aiosqlite](https://github.com/omnilib/aiosqlite) 与 [asyncpg](https://github.com/MagicStack/asyncpg) | 分别作为默认 SQLite 和可选 PostgreSQL 的 SQLAlchemy 异步驱动。 |
 | [sqlite-vec](https://github.com/asg017/sqlite-vec) | vec0 虚拟表提供 ANN 向量检索；扩展不可用时自动退化为 BLOB 余弦扫描。 |
+| [jieba](https://github.com/fxsjy/jieba) | 中文分词后写入 FTS5，为 BM25 稀疏检索提供关键词索引（FTS5 本身不支持中文分词）。 |
 
 ## API 概览
 
