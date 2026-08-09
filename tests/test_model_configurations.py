@@ -92,7 +92,10 @@ class ModelConfigurationTest(unittest.TestCase):
             )
         self.assertEqual(stream_response.status_code, 200, stream_response.text)
         self.assertTrue(stream_response.headers["content-type"].startswith("text/event-stream"))
-        self.assertEqual(stream_response.text, 'event: message\ndata: {"content": "hello"}\n\nevent: done\ndata: {}\n\n')
+        self.assertEqual(
+            stream_response.text,
+            'event: message\ndata: {"content": "hello"}\n\nevent: done\ndata: {"sources": []}\n\n',
+        )
 
     def test_tool_enabled_chat_streams_model_chunks(self) -> None:
         class Chunk:
@@ -260,7 +263,7 @@ class ModelConfigurationTest(unittest.TestCase):
                     ChatMessageInput(role="user", content="What is the weather?"),
                     ChatMessageInput(role="assistant", content="Let me check."),
                 ]
-                messages = await assemble_context(
+                messages, sources = await assemble_context(
                     session,
                     user,
                     workspace_id,
@@ -269,6 +272,7 @@ class ModelConfigurationTest(unittest.TestCase):
                     "zh",
                     tool_results=["Document: report.pdf\nExtracted content."],
                 )
+                self.assertEqual(sources, [])
                 self.assertEqual(len(messages), 7)
                 self.assertEqual(messages[0].role, "system")
                 self.assertIn("The active application language is zh", messages[0].content)
@@ -281,7 +285,7 @@ class ModelConfigurationTest(unittest.TestCase):
                 self.assertEqual(messages[6].role, "system")
                 self.assertIn("Document: report.pdf", messages[6].content)
 
-                standalone = await assemble_context(
+                standalone, standalone_sources = await assemble_context(
                     session,
                     user,
                     None,
@@ -289,6 +293,7 @@ class ModelConfigurationTest(unittest.TestCase):
                     [ChatMessageInput(role="user", content="Hello")],
                     "en",
                 )
+                self.assertEqual(standalone_sources, [])
                 self.assertEqual(len(standalone), 2)
                 self.assertEqual(standalone[0].role, "system")
                 self.assertIn("The active application language is en", standalone[0].content)
