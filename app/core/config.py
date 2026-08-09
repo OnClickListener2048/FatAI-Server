@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     cors_origins: list[str] = Field(default_factory=list)
     request_timeout_seconds: float = Field(default=20, gt=0, le=120)
     docling_server_url: AnyHttpUrl = "http://127.0.0.1:5001"
+    # 文档转换是慢路径(本地 CPU 上大图 OCR/多页 PDF 常超过 20s 的通用超时):
+    # 独立的转换超时, 与 docling-serve 自身的 document_timeout 默认值一致。
+    docling_timeout_seconds: float = Field(default=300, gt=0, le=3600)
     max_document_size_bytes: int = Field(default=50 * 1024 * 1024, gt=0)
     openai_api_key: str | None = None
     openai_base_url: AnyHttpUrl | None = None

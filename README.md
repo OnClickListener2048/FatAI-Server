@@ -34,6 +34,7 @@ uv run python main.py
 | 用户模型密钥 | 在客户端的“模型提供商”中按用户添加；服务端以 JWT 认证的用户 ID 隔离保存，并用 `JWT_SECRET` 派生的密钥加密后存储。 |
 | `JWT_SECRET` | 访问令牌签名密钥，同时用于加密用户模型密钥；部署时必须替换默认值并保持稳定。 |
 | `DOCLING_SERVER_URL` | 文档解析服务地址，默认 `http://127.0.0.1:5001`。 |
+| `DOCLING_TIMEOUT_SECONDS` | Docling 转换超时（默认 300 秒）。大图 OCR/多页 PDF 在本地 CPU 上常超过通用 20s 请求超时，使用独立的长超时 client。 |
 | `DATABASE_URL` | SQLAlchemy 异步连接串，默认 `sqlite+aiosqlite:///./fat_ai.db`；可使用 `postgresql+asyncpg://...`。 |
 | `JWT_SECRET` / `JWT_EXPIRATION_MINUTES` | 访问令牌签名密钥与有效期；生产环境必须替换默认密钥。 |
 | `CORS_ORIGINS` | 允许的来源 JSON 数组，例如 `["http://localhost:3000"]`。 |

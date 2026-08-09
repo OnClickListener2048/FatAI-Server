@@ -27,8 +27,11 @@ async def lifespan(app: FastAPI):
     await initialize_database()
     client = httpx.AsyncClient(timeout=settings.request_timeout_seconds, follow_redirects=True)
     app.state.search_service = BingRssSearchService(client)
+    # Docling 转换单独使用长超时 client: 通用超时(20s)会掐断本地 CPU 上的
+    # 大文件转换(OCR/多页 PDF 常见 30s+), 表现为误报 DOCLING_UNAVAILABLE。
+    docling_client = httpx.AsyncClient(timeout=settings.docling_timeout_seconds, follow_redirects=True)
     app.state.document_service = DoclingDocumentService(
-        client=client,
+        client=docling_client,
         server_url=str(settings.docling_server_url),
         max_size_bytes=settings.max_document_size_bytes,
     )
@@ -63,6 +66,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(indexer.backfill_memories())
     yield
     app.state.rag_worker.cancel()
+    await docling_client.aclose()
     await client.aclose()
 
 
