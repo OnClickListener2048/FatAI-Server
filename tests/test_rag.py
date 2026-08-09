@@ -105,6 +105,17 @@ class ChunkerTest(unittest.TestCase):
         self.assertIn("其他完全不同的句子", chunks[1]["content"])
         self.assertNotIn("其他完全不同", chunks[0]["content"])
 
+    def test_sparse_breaks_fall_back_to_sentence_window(self) -> None:
+        # 高度连续文本中只有一个低相似度断点: 按断点切会得到 300 字符的单块,
+        # 超过 max_chars*2 → 滑窗兜底, 不得产出超大块
+        md = "# 主题\n\n" + "工作相关内容句子。" * 30 + "其他完全不同的句子。" + "工作相关内容句子。" * 30
+        chunks = asyncio.run(chunk_markdown(md, _SimilarityEmbedder(), max_chars=100))
+        self.assertGreater(len(chunks), 2)
+        # 滑窗块约 100 字符; 末尾碎块(<60)会被合并进前一块, 允许到 max_chars*2
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk["content"]), 100 * 2)
+        self.assertIn("其他完全不同的句子", "".join(chunk["content"] for chunk in chunks))
+
     def test_long_uniform_text_falls_back_to_sentence_window(self) -> None:
         # 内容高度连续(无处语义断开)但远超上限 → 句子滑窗兜底, 不产生超大单块
         md = "# 主题\n\n" + "连续的重复文本内容。" * 30
@@ -120,6 +131,19 @@ class ChunkerTest(unittest.TestCase):
             self.assertLessEqual(len(chunk), 200 + 10)  # 只允许最后一块略超(句末残留)
         # 分句保留句末标点,拼接后应完整还原原文(无字符丢失)
         self.assertEqual("".join(chunks), text)
+
+    def test_oversized_sentence_cut_at_table_column_boundary(self) -> None:
+        # docling 把 xlsx 整行数据渲染成无换行的超长行: 滑窗必须在列边界
+        # 继续硬切, 否则单句会吞掉整块(之前产出 4.6K-78K 的单块)
+        row = "| 省（区、市）" + " " * 30 + "| 机构数（个）" + " " * 30 + "| 百分比（%）" + " " * 30 + "| 备注" + " " * 30
+        md = "# 主题\n\n" + row * 40
+        chunks = asyncio.run(chunk_markdown(md, _SimilarityEmbedder(), max_chars=100))
+        self.assertGreater(len(chunks), 3)
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk["content"]), 100 * 2)
+        # 切点落在列边界(| 之后), 不撕裂单元格内容
+        joined = "".join(chunk["content"] for chunk in chunks)
+        self.assertEqual(joined.count("|"), (row * 40).count("|"))
 
     def test_short_sections_merged(self) -> None:
         md = "# 标题\n\n短句。\n\n另一短句。"

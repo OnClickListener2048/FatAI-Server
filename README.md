@@ -41,7 +41,7 @@ uv run python main.py
 | `UPLOAD_DIRECTORY` / `MAX_DOCUMENT_SIZE_BYTES` | 上传文件目录和大小上限（默认 50 MiB）。 |
 | `ALLOW_LOCAL_DOCUMENT_PATHS` | 仅为本地桌面端迁移保留 JSON `localPath` 读取；部署到远程环境前设为 `false`。 |
 | `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` | 嵌入服务（OpenAI 兼容 `POST /embeddings`），默认本地 Ollama `http://127.0.0.1:11434/v1` + `bge-m3`（1024 维）。 |
-| `RAG_TOP_K_MEMORY` / `RAG_TOP_K_DOCUMENT` / `RAG_MIN_SCORE` | 检索召回数与相似度阈值（默认 8 / 5 / 0.45）。 |
+| `RAG_TOP_K_MEMORY` / `RAG_TOP_K_DOCUMENT` / `RAG_MIN_SCORE` | 检索召回数与向量路相似度阈值（默认 8 / 5 / 0.55；bge-m3 对表格行/数字给分偏高，0.45 会漏进无关命中）。 |
 | `RAG_CHUNK_CHARS` | 语义分块的最大块大小（默认 800 字符；目标块约为其 70%）。 |
 | `RAG_SWEEP_SECONDS` | 知识文档 worker 轮询间隔（默认 5 秒）。 |
 

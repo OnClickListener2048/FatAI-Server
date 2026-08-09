@@ -97,7 +97,9 @@ async def _semantic_split(body: str, embedder, max_chars: int) -> list[str]:
         return [body]
     sentences = _split_sentences(body)
     if len(sentences) <= 1:
-        return [body]
+        # 无句法断点(如 docling 把 xlsx 整行数据渲染成无换行的超长行):
+        # 直接返回会产出远超上限的单块, 走滑窗硬切。
+        return _sentence_window(sentences, max_chars)
     vectors = await embedder.embed(sentences)
     similarities = [_cosine(vectors[i], vectors[i + 1]) for i in range(len(vectors) - 1)]
     sentence_chars = [len(sentence) for sentence in sentences]
@@ -107,18 +109,15 @@ async def _semantic_split(body: str, embedder, max_chars: int) -> list[str]:
         max_chars,
         int(max_chars * TARGET_FRACTION),
     )
-    if not breaks and len(body) > max_chars * 2:
-        # 语义上无处断开(段落内容高度连续)但文本过长: 句子滑窗兜底,
-        # 避免产出远超 max_chars 的单块
-        chunks, current = [], ""
-        for sentence in sentences:
-            if len(current) + len(sentence) > max_chars and current:
-                chunks.append(current)
-                current = ""
-            current += sentence
-        if current:
-            chunks.append(current)
-        return chunks
+    pieces = _assemble_chunks(sentences, breaks)
+    if max(len(piece) for piece in pieces) <= max_chars * 2:
+        return pieces
+    # 语义断点不足: 文本高度连续时(如整表 xlsx 的行结构相似)只找到零星断点,
+    # 直接按断点切会产出远超 max_chars 的单块 —— 句子滑窗硬切兜底。
+    return _sentence_window(sentences, max_chars)
+
+
+def _assemble_chunks(sentences: list[str], breaks: set[int]) -> list[str]:
     chunks: list[str] = []
     current: list[str] = []
     for index, sentence in enumerate(sentences):
@@ -128,6 +127,44 @@ async def _semantic_split(body: str, embedder, max_chars: int) -> list[str]:
             current = []
     if current:
         chunks.append("".join(current))
+    return chunks
+
+
+def _find_cut(text: str, max_chars: int) -> int:
+    """超长单句的切断位置: 优先在表格列边界(|)之后, 退化为 max_chars 硬切。
+
+    docling 渲染 xlsx 时每行数据是一整行无换行的超长文本, 列间只有
+    空格填充; 在 max_chars 前的最后一个列边界切, 保留单元格完整性。
+    若最近的列边界过早(浪费 > 一半配额)则直接硬切。
+    """
+    if "|" in text:
+        idx = text.rfind("|", 0, max_chars)
+        if idx != -1 and idx >= max_chars // 2:
+            return idx + 1
+    return max_chars
+
+
+def _sentence_window(sentences: list[str], max_chars: int) -> list[str]:
+    """句子滑窗硬切, 每块不超过 max_chars(语义分块兜底)。
+
+    单个句子超过 max_chars 时(docling 的 xlsx 超长行)在列边界继续硬切,
+    保证块大小上限; 否则块可能吞下整个超长行。
+    """
+    chunks, current = [], ""
+    for sentence in sentences:
+        while len(sentence) > max_chars:
+            if current:
+                chunks.append(current)
+                current = ""
+            cut = _find_cut(sentence, max_chars)
+            chunks.append(sentence[:cut])
+            sentence = sentence[cut:]
+        if len(current) + len(sentence) > max_chars and current:
+            chunks.append(current)
+            current = ""
+        current += sentence
+    if current:
+        chunks.append(current)
     return chunks
 
 
@@ -164,13 +201,4 @@ def chunk_text(text: str, max_chars: int = 800) -> list[str]:
     if len(text) <= max_chars:
         return [text]
     sentences = _split_sentences(text)
-    chunks: list[str] = []
-    current = ""
-    for sentence in sentences:
-        if len(current) + len(sentence) > max_chars and current:
-            chunks.append(current)
-            current = ""
-        current += sentence
-    if current:
-        chunks.append(current)
-    return chunks
+    return _sentence_window(sentences, max_chars)

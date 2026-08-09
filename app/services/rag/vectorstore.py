@@ -82,15 +82,20 @@ def pack_embedding(vector: list[float]) -> bytes:
 
 
 def _tokenize(text: str) -> str:
-    """jieba 分词后拼成 FTS5 MATCH 查询串。
+    """jieba 分词后拼成 FTS5 MATCH 查询串(OR 连接)。
 
     写入与查询共用同一分词逻辑; 每个词加引号避免 FTS 语法字符
     (引号/括号等)导致查询报错。
+
+    查询必须用 OR: 空格 = 隐式 AND, 要求查询分词与索引分词粒度一致,
+    而同一文本在不同上下文 jieba 切法不同(短查询切得粗, 如"监测数据",
+    长文档里被切成"监测 数据"), AND 查询必然 0 命中。OR + BM25 排名
+    由匹配词数天然加权, 匹配词更多的文档排在前面。
     """
     import jieba
 
     tokens = [token.strip() for token in jieba.cut(text) if token.strip()]
-    return " ".join(f'"{token}"' for token in tokens)
+    return " OR ".join(f'"{token}"' for token in tokens)
 
 
 def unpack_embedding(blob: bytes) -> list[float]:

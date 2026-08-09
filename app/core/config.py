@@ -34,7 +34,9 @@ class Settings(BaseSettings):
     embedding_dimensions: int = Field(default=1024, ge=64, le=8192)
     rag_top_k_memory: int = Field(default=8, ge=1, le=50)
     rag_top_k_document: int = Field(default=5, ge=1, le=50)
-    rag_min_score: float = Field(default=0.45, ge=0, le=1)
+    # 向量路余弦底线: bge-m3 对中文短文本(表格行/数字)普遍给 0.4-0.5 高分,
+    # 0.45 挡不住无关查询; 相关查询命中实测 ≥0.57, 取 0.55。
+    rag_min_score: float = Field(default=0.55, ge=0, le=1)
     rag_chunk_chars: int = Field(default=800, ge=100, le=10_000)
     rag_sweep_seconds: float = Field(default=5.0, gt=0, le=3600)
 
