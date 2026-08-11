@@ -1,3 +1,4 @@
+import asyncio
 import json
 import shutil
 import uuid
@@ -5,7 +6,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select
@@ -16,6 +17,7 @@ from app.core.config import get_settings
 from app.models import (
     ChatMessageInput,
     ChatStreamRequest,
+    DocumentReadResponse,
     SyncChangeResponse,
     SyncChangesResponse,
     SyncOperationInput,
@@ -47,6 +49,24 @@ from app.services.model_configurations import encrypt_api_key, get_user_model_cr
 router = APIRouter(prefix="/v1")
 Session = Annotated[AsyncSession, Depends(get_session)]
 CurrentUser = Annotated[User, Depends(get_current_user)]
+
+# Keeps detached background tasks alive; asyncio otherwise garbage-collects unreferenced tasks.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+def _reindex_memory(request: Request, memory_id: str, operation: str = "UPSERT") -> None:
+    """RAG 索引钩子: 记忆写入/归档/删除后异步重建或清除其向量 chunk。"""
+    indexer = getattr(request.app.state, "rag_indexer", None)
+    if indexer is None:
+        return
+    coro = indexer.delete_memory(memory_id) if operation == "DELETE" else indexer.index_memory(memory_id)
+    _spawn_background(coro)
 
 
 class RegisterRequest(BaseModel):
@@ -266,6 +286,7 @@ async def apply_sync_operation(
     payload: SyncOperationInput,
     user: CurrentUser,
     session: Session,
+    request: Request,
 ) -> SyncOperationResponse:
     """Apply one durable, ordered and idempotent client mutation."""
     previous = await session.scalar(
@@ -342,6 +363,8 @@ async def apply_sync_operation(
         if previous is not None:
             return SyncOperationResponse.model_validate(json.loads(previous.response_json))
         raise
+    if applied and payload.entity_type == "memory":
+        _reindex_memory(request, payload.entity_id, payload.operation)
     return result
 
 
@@ -729,36 +752,39 @@ async def list_memories(user: CurrentUser, session: Session, workspace_id: str |
 
 
 @router.post("/memories", status_code=status.HTTP_201_CREATED)
-async def create_memory(payload: MemoryInput, user: CurrentUser, session: Session) -> dict:
+async def create_memory(payload: MemoryInput, user: CurrentUser, session: Session, request: Request) -> dict:
     record = MemoryEntry(user_id=user.id, **payload.model_dump(exclude_none=True))
     session.add(record)
     await session.flush()
     await record_change(session, user, "memory", record.id, "UPSERT", entity_payload(record))
     await session.commit()
     await session.refresh(record)
+    _reindex_memory(request, record.id)
     return entity_payload(record)
 
 
 @router.post("/memories/{memory_id}/archive")
-async def archive_memory(memory_id: str, user: CurrentUser, session: Session) -> dict:
+async def archive_memory(memory_id: str, user: CurrentUser, session: Session, request: Request) -> dict:
     record = await owned_or_404(session, MemoryEntry, memory_id, user.id)
     record.is_archived = True
     await record_change(session, user, "memory", record.id, "UPSERT", entity_payload(record))
     await session.commit()
+    _reindex_memory(request, record.id)
     return entity_payload(record)
 
 
 @router.patch("/memories/{memory_id}")
-async def update_memory(memory_id: str, payload: MemoryUpdateInput, user: CurrentUser, session: Session) -> dict:
+async def update_memory(memory_id: str, payload: MemoryUpdateInput, user: CurrentUser, session: Session, request: Request) -> dict:
     record = await owned_or_404(session, MemoryEntry, memory_id, user.id)
     record.content = payload.content
     await record_change(session, user, "memory", record.id, "UPSERT", entity_payload(record))
     await session.commit()
+    _reindex_memory(request, record.id)
     return entity_payload(record)
 
 
 @router.post("/memories/clear")
-async def clear_memories(user: CurrentUser, session: Session) -> dict:
+async def clear_memories(user: CurrentUser, session: Session, request: Request) -> dict:
     records = await session.scalars(
         select(MemoryEntry).where(MemoryEntry.user_id == user.id, MemoryEntry.is_archived.is_(False))
     )
@@ -766,6 +792,8 @@ async def clear_memories(user: CurrentUser, session: Session) -> dict:
         record.is_archived = True
         await record_change(session, user, "memory", record.id, "UPSERT", entity_payload(record))
     await session.commit()
+    for record in records:
+        _reindex_memory(request, record.id)
     return {"cleared": True}
 
 
@@ -823,6 +851,26 @@ async def upload_file(
     return entity_payload(record)
 
 
+@router.post("/files/{file_id}/read", response_model=DocumentReadResponse)
+async def read_uploaded_document(
+    file_id: str,
+    user: CurrentUser,
+    session: Session,
+    request: Request,
+) -> DocumentReadResponse:
+    """把已上传的文件资产转换为 Markdown(对象存储引用语义: 客户端只持 file_id)。
+
+    与 /v1/tools/document-read 的区别: 该端点要求鉴权并从服务端存储读取文件,
+    客户端无需再向服务端暴露本地路径。
+    """
+    asset = await owned_or_404(session, FileAsset, file_id, user.id)
+    path = Path(asset.storage_path)
+    if not path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The uploaded file has been removed from storage.")
+    document_service = request.app.state.document_service
+    return await document_service.read(asset.display_name, asset.mime_type, path.read_bytes())
+
+
 @router.post("/knowledge/documents/{file_id}", status_code=status.HTTP_202_ACCEPTED)
 async def enqueue_knowledge_document(file_id: str, user: CurrentUser, session: Session) -> dict:
     asset = await owned_or_404(session, FileAsset, file_id, user.id)
@@ -830,6 +878,31 @@ async def enqueue_knowledge_document(file_id: str, user: CurrentUser, session: S
     session.add(record)
     await session.commit()
     await session.refresh(record)
+    return entity_payload(record)
+
+
+@router.get("/knowledge/documents/{file_id}")
+async def get_knowledge_document(file_id: str, user: CurrentUser, session: Session) -> dict:
+    """知识文档处理状态(索引由后台 worker 异步执行)。"""
+    record = await session.scalar(
+        select(KnowledgeDocument).where(KnowledgeDocument.file_asset_id == file_id, KnowledgeDocument.user_id == user.id)
+    )
+    if record is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Knowledge document was not found.")
+    return entity_payload(record)
+
+
+@router.post("/knowledge/documents/{file_id}/retry", status_code=status.HTTP_202_ACCEPTED)
+async def retry_knowledge_document(file_id: str, user: CurrentUser, session: Session) -> dict:
+    """把失败的文档重新入队;worker 在下一轮 sweep 内重试。"""
+    record = await session.scalar(
+        select(KnowledgeDocument).where(KnowledgeDocument.file_asset_id == file_id, KnowledgeDocument.user_id == user.id)
+    )
+    if record is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Knowledge document was not found.")
+    if record.status == "FAILED":
+        record.status = "QUEUED"
+        await session.commit()
     return entity_payload(record)
 
 

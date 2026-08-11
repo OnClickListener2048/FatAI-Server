@@ -44,7 +44,7 @@ A key shared dependency: `routes.py` imports `record_change` and `entity_payload
 
 ### SSE events
 
-Three event types: `message` (incremental content, can include `reasoning_content`), `tool_call` (with structured `sources`), and `done`.
+Three event types: `message` (incremental content, can include `reasoning_content`), `tool_call` (with structured `sources`), and `done`. The `done` event carries `{"sources": [...]}` — the RAG references injected into the context as `{title, kind, id}` (`kind` is `memory` or `knowledge_document`); empty array when nothing was injected.
 
 ## Server-Side Context Assembly
 
@@ -53,11 +53,24 @@ Three event types: `message` (incremental content, can include `reasoning_conten
 1. Core policy (`SYSTEM_PROMPT` — provider-neutral instructions, response language, instruction priority)
 2. Enabled prompt templates (scoped to workspace or global, ordered by priority desc)
 3. Workspace instruction (name + system_prompt)
-4. Memories (GLOBAL + WORKSPACE + CONVERSATION scope, last 20 by updated_at)
-5. Last 20 history turns from the client
-6. Tool results (appended as system messages, marked as reference data only)
+4. RAG-recalled memories and knowledge documents (when the retriever is available; see below)
+5. Memories fallback (last 20 by `updated_at`) when retrieval is unavailable or returns nothing
+6. Last 20 history turns from the client
+7. Tool results (appended as system messages, marked as reference data only)
 
 The policy explicitly prevents reference data (memories, tool results, history) from overriding core instructions. The `{responseLanguageTag}` placeholder is replaced with the client's language tag.
+
+## RAG (Server-Side Retrieval)
+
+`app/services/rag/` implements retrieval over memories and knowledge documents:
+
+- **`embedding.py`** — OpenAI-compatible `POST {base_url}/embeddings` client (default: local Ollama `bge-m3`, 1024 dims). Responses are sorted by `index`; vectors are normalized so cosine == dot product.
+- **`chunking.py`** — semantic chunking + structure awareness (current mainstream approach): heading stack → `path > path` prefixes; overlong sections are embedded sentence-by-sentence (one extra batch call) and split at low-similarity boundaries (LlamaIndex SemanticSplitterNodeParser style; boundaries above `BREAK_THRESHOLD` 0.5 never hard-split); target chunk size = 70% of `RAG_CHUNK_CHARS`, so chunks may slightly exceed the cap instead of breaking mid-thought; uniform high-similarity text falls back to a sentence sliding window; chunks < 60 chars merge with the previous same-path chunk. Memories use plain sentence-window chunking (`chunk_text`, no overlap).
+- **`vectorstore.py`** — chunk metadata + vectors in the SQLite database. `chunks_vec0` (sqlite-vec vec0 virtual table) provides ANN search; when the extension is unavailable, `document_chunks.embedding` BLOBs fall back to a Python cosine scan. `chunk_fts` (FTS5) holds jieba-tokenized content for BM25; when FTS5 is unavailable, `bm25_search` returns empty and retrieval degrades to vector-only. **The extension is loaded per connection** (SQLite extensions are per-connection); vec0 returns L2 distance, converted via `cos = 1 - L2²/2` (normalized vectors). vec0 metadata columns reject NULL — absent `workspace_id` is stored as `""`. FTS5 deletes only work by `rowid` — `_delete_fts_rows` resolves rowids first; deletion order is vec0/FTS before `document_chunks`. Writes go through a dedicated sync `sqlite3` connection via `asyncio.to_thread`, never SQLAlchemy (aiosqlite's `load_extension` is a coroutine).
+- **`indexing.py`** — `index_memory()` hooks on memory create/update/archive (REST + sync paths via `domain_routes._reindex_memory`); `backfill_memories()` indexes memories with zero chunks on startup. `knowledge_document_worker()` polls `QUEUED` documents every `RAG_SWEEP_SECONDS`, CAS-claims rows (`PROCESSING`), converts via Docling, chunks, embeds, and marks `READY`/`FAILED`.
+- **`retrieval.py`** — hybrid retrieval with RRF fusion. Two recall paths (each `_RAW_TOP_K`=50): dense (`vec0` ANN; hits below `RAG_MIN_SCORE` are dropped as a semantic quality floor) and sparse (jieba-tokenized FTS5 BM25; keyword-exact matches pass regardless of vector score — numbers, IDs, proper nouns). RRF merges both by rank: `score = Σ 1/(k + rank)`, k=60 (Cornack et al. 2009). Fused ranking is scope post-filtered (vec0 only supports equality aux-column filters): GLOBAL always, WORKSPACE/CONVERSATION by the request's IDs, knowledge docs only within the request's workspace. Empty/failed retrieval falls back to recent memories so chat never breaks.
+
+The retriever is optional — `assemble_context(..., retriever=None)` disables RAG entirely. `app/main.py` constructs the services in lifespan and stores them on `app.state` (`rag_retriever`, `rag_worker`).
 
 ## BYOK Model: Credential Encryption
 
@@ -98,6 +111,8 @@ This means the client no longer syncs chat messages — the server owns the pers
 ## Database
 
 SQLAlchemy 2.0 async with `aiosqlite` (default) or `asyncpg` (PostgreSQL). **No migrations** — `Base.metadata.create_all` runs at startup. Tables: `users`, `workspaces`, `conversations`, `model_configurations`, `messages`, `memory_entries`, `prompt_templates`, `file_assets`, `knowledge_documents`, `app_settings`, `sync_operations`, `sync_entity_states`, `sync_changes`.
+
+The RAG vector store lives **inside the same SQLite file**: the `document_chunks` table (metadata + scan-mode embedding BLOB), the `chunks_vec0` vec0 virtual table, and the `chunk_fts` FTS5 table (jieba-tokenized content for BM25) are created by `VectorStore.initialize()` at startup. On PostgreSQL (`DATABASE_URL` non-SQLite) the vector store is disabled and retrieval falls back to recency — embeddings are not stored in Postgres.
 
 All domain models use `IdTimestampMixin` (UUID PK, created_at, updated_at). Database sessions are obtained via FastAPI dependency (`get_session` → `SessionLocal`).
 

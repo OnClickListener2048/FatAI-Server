@@ -167,6 +167,7 @@ class SyncChange(Base):
 engine = create_async_engine(
     get_settings().database_url,
     future=True,
+    connect_args={},  # WAL + busy_timeout applied via the connect event below
 )
 
 

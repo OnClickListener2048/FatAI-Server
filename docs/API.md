@@ -55,9 +55,18 @@ optional `tool_results` (string array of transient client-side tool output), opt
 `assistant_message_id` (the client-owned ids under which the turn is persisted).
 
 Context is assembled server-side (`app/services/context.py`): the core policy, enabled prompt
-templates, the workspace instruction, recalled memories, and the history limit (last 20 turns)
-are layered in a fixed order; `tool_results` are appended after history. Clients therefore only
-send their own turns and never influence the instruction layers.
+templates, the workspace instruction, RAG-recalled memories and knowledge documents, and the
+history limit (last 20 turns) are layered in a fixed order; `tool_results` are appended after
+history. Clients therefore only send their own turns and never influence the instruction layers.
+
+RAG retrieval runs when the embedder and vector store are available (see
+`app/services/rag/`): the last user turn is embedded, the nearest memory chunks are recalled
+subject to scope (GLOBAL always, WORKSPACE/CONVERSATION only when the chunk belongs to the
+request's workspace/conversation), and knowledge documents are recalled only within the
+request's workspace. Hits above `RAG_MIN_SCORE` are injected as read-only "memory reference" /
+"knowledge reference" blocks; if retrieval fails or returns nothing, the context falls back to
+the recent-memories query (last 20 by `updated_at`). The `done` event reports every injected
+hit as `{title, kind, id}` (`kind` is `memory` or `knowledge_document`).
 
 Conversation chats (with `conversation_id` and `assistant_message_id`) are persisted directly:
 the server upserts the conversation when missing, saves the user turn and the assistant answer,
@@ -76,12 +85,14 @@ event: tool_call
 data: {"id":"call_1","name":"web_search","arguments":{"query":"iPhone 17 price"},"sources":[{"title":"Apple","url":"https://www.apple.com/iphone/"}]}
 
 event: done
-data: {}
+data: {"sources":[{"title":"Fact memory","kind":"memory","id":"mem-1"}]}
 ```
 
 `message` events are emitted incrementally, including when tool definitions are supplied.
 `tool_call` events carry the structured `sources` (title and URL) produced by server-side tool
-execution, deduplicated by URL across the whole request.
+execution, deduplicated by URL across the whole request. The final `done` event carries
+`sources`, the RAG references injected into the context: `{title, kind, id}`, where `kind` is
+`memory` or `knowledge_document`; an empty array means no references were injected.
 
 ## Workspaces, conversations, and messages
 
@@ -103,8 +114,11 @@ Conversation creation requires `workspace_id`, `model`, and optionally `id`, `ti
 | `GET`, `POST` | `/v1/memories` | List or create memories. |
 | `POST` | `/v1/memories/{id}/archive` | Archive a memory. |
 | `GET`, `POST` | `/v1/prompt-templates` | List or create prompt templates. |
-| `POST` | `/v1/files` | Upload a file as `multipart/form-data` with a `file` part. |
-| `POST` | `/v1/knowledge/documents/{file_id}` | Queue an uploaded file for knowledge processing. |
+| `POST` | `/v1/files` | Upload a file as `multipart/form-data` with a `file` part; returns the stored asset (`id`, `display_name`, `storage_path`, …). |
+| `POST` | `/v1/files/{file_id}/read` | Convert a stored upload to Markdown via Docling; authenticated, server-side read by `file_id` (S3-like reference semantics). |
+| `POST` | `/v1/knowledge/documents/{file_id}` | Queue an uploaded file for knowledge processing (status transitions `QUEUED` → `PROCESSING` → `READY`/`FAILED`). |
+| `GET` | `/v1/knowledge/documents/{file_id}` | Return the processing status and error message of a knowledge document. |
+| `POST` | `/v1/knowledge/documents/{file_id}/retry` | Re-queue a `FAILED` knowledge document. |
 | `GET`, `PUT` | `/v1/settings/{key}` | Read or set a user setting (`{"value":"..."}`). |
 
 Memory creation accepts `scope` (`GLOBAL`, `WORKSPACE`, or `CONVERSATION`) and `content`;

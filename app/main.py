@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 import logging
 
 import httpx
@@ -13,6 +14,10 @@ from app.models import ApiError, HealthResponse
 from app.api.domain_routes import router as domain_router
 from app.services.documents import DoclingDocumentService
 from app.services.errors import ServiceError
+from app.services.rag.embedding import EmbeddingService
+from app.services.rag.indexing import IndexingService, knowledge_document_worker
+from app.services.rag.retrieval import RetrievalService
+from app.services.rag.vectorstore import VectorStore
 from app.services.search import BingRssSearchService
 
 
@@ -22,12 +27,46 @@ async def lifespan(app: FastAPI):
     await initialize_database()
     client = httpx.AsyncClient(timeout=settings.request_timeout_seconds, follow_redirects=True)
     app.state.search_service = BingRssSearchService(client)
+    # Docling 转换单独使用长超时 client: 通用超时(20s)会掐断本地 CPU 上的
+    # 大文件转换(OCR/多页 PDF 常见 30s+), 表现为误报 DOCLING_UNAVAILABLE。
+    docling_client = httpx.AsyncClient(timeout=settings.docling_timeout_seconds, follow_redirects=True)
     app.state.document_service = DoclingDocumentService(
-        client=client,
+        client=docling_client,
         server_url=str(settings.docling_server_url),
         max_size_bytes=settings.max_document_size_bytes,
     )
+    # RAG: embedding -> 向量存储 -> 索引/检索。向量库不可用时检索自动降级为空,
+    # 聊天流随后按旧逻辑(时间倒序记忆)继续。
+    embedder = EmbeddingService(
+        settings.embedding_base_url,
+        settings.embedding_api_key,
+        settings.embedding_model,
+        settings.embedding_dimensions,
+    )
+    vector_store = VectorStore(settings.database_url, settings.embedding_dimensions)
+    vector_store.initialize()
+    indexer = IndexingService(
+        embedder,
+        vector_store,
+        app.state.document_service,
+        chunk_chars=settings.rag_chunk_chars,
+    )
+    app.state.rag_vector_store = vector_store
+    app.state.rag_indexer = indexer
+    app.state.rag_retriever = RetrievalService(
+        embedder,
+        vector_store,
+        top_k_memory=settings.rag_top_k_memory,
+        top_k_document=settings.rag_top_k_document,
+        min_score=settings.rag_min_score,
+    )
+    app.state.rag_worker = asyncio.create_task(
+        knowledge_document_worker(indexer, settings.rag_sweep_seconds)
+    )
+    asyncio.create_task(indexer.backfill_memories())
     yield
+    app.state.rag_worker.cancel()
+    await docling_client.aclose()
     await client.aclose()
 
 
