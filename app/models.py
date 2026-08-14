@@ -88,6 +88,7 @@ class SyncOperationInput(BaseModel):
         "memory",
         "prompt_template",
         "model_configuration",
+        "file_asset",
         "setting",
     ]
     entity_id: str = Field(min_length=1, max_length=64)

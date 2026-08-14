@@ -187,6 +187,7 @@ SYNC_MODELS = {
     "memory": MemoryEntry,
     "prompt_template": PromptTemplate,
     "model_configuration": ModelConfiguration,
+    "file_asset": FileAsset,
 }
 
 
@@ -390,6 +391,7 @@ async def get_sync_snapshot(user: CurrentUser, session: Session) -> SyncSnapshot
         ("memory", MemoryEntry),
         ("prompt_template", PromptTemplate),
         ("model_configuration", ModelConfiguration),
+        ("file_asset", FileAsset),
         ("setting", AppSetting),
     )
     for entity_type, model in snapshot_models:
@@ -822,6 +824,7 @@ async def upload_file(
     file: Annotated[UploadFile, File()],
     user: CurrentUser,
     session: Session,
+    request: Request,
     workspace_id: str | None = Query(default=None),
     conversation_id: str | None = Query(default=None),
 ) -> dict:
@@ -846,6 +849,11 @@ async def upload_file(
         storage_path=str(stored_path),
     )
     session.add(record)
+    await session.flush()
+    # Absolute URL other devices use to fetch the bytes after the sync stream delivers
+    # this attachment's metadata. `request.base_url` reflects the public host the caller
+    # actually used, so it stays reachable from the device that uploaded the file.
+    record.url = str(request.base_url).rstrip("/") + f"/v1/files/{record.id}"
     await session.commit()
     await session.refresh(record)
     return entity_payload(record)

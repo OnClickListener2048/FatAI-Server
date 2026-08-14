@@ -100,7 +100,9 @@ class FileAsset(IdTimestampMixin, Base):
     display_name: Mapped[str] = mapped_column(String(512))
     mime_type: Mapped[str] = mapped_column(String(160))
     size_bytes: Mapped[int] = mapped_column(Integer)
-    storage_path: Mapped[str] = mapped_column(String(1024))
+    # 同步流创建的记录没有本地存储路径(字节由上传方服务端持有), 缺省为空串即可
+    storage_path: Mapped[str] = mapped_column(String(1024), default="")
+    url: Mapped[str] = mapped_column(String(1024), default="")
     status: Mapped[str] = mapped_column(String(32), default="UPLOADED")
 
 
