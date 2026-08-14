@@ -87,7 +87,7 @@ class ModelConfigurationTest(unittest.TestCase):
         self.assertTrue(stream_response.headers["content-type"].startswith("text/event-stream"))
         self.assertEqual(
             stream_response.text,
-            'event: message\ndata: {"content": "hello"}\n\nevent: done\ndata: {"sources": []}\n\n',
+            'event: message\ndata: {"content": "hello"}\n\nevent: done\ndata: {"persisted": true, "sources": []}\n\n',
         )
 
     def test_tool_enabled_chat_streams_model_chunks(self) -> None:
