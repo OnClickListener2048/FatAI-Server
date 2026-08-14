@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -869,6 +869,28 @@ async def read_uploaded_document(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "The uploaded file has been removed from storage.")
     document_service = request.app.state.document_service
     return await document_service.read(asset.display_name, asset.mime_type, path.read_bytes())
+
+
+@router.get("/files/{file_id}")
+async def download_file(
+    file_id: str,
+    user: CurrentUser,
+    session: Session,
+) -> FileResponse:
+    """下载已上传文件的原始字节(与 /read 的 Markdown 转换相对)。
+
+    客户端在 Android 上交给系统 DownloadManager 下载、在桌面/iOS 上经系统保存对话框
+    落盘;服务端只按 file_id 返回用户隔离目录中的原文件。
+    """
+    asset = await owned_or_404(session, FileAsset, file_id, user.id)
+    path = Path(asset.storage_path)
+    if not path.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "The uploaded file has been removed from storage.")
+    return FileResponse(
+        path=str(path),
+        media_type=asset.mime_type or "application/octet-stream",
+        filename=Path(asset.display_name or "attachment").name,
+    )
 
 
 @router.post("/knowledge/documents/{file_id}", status_code=status.HTTP_202_ACCEPTED)
