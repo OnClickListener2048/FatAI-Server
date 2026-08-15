@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.db import Conversation, Message, SessionLocal, User, get_session
+from app.db import Conversation, Message, SessionLocal, TokenUsageEntry, User, get_session
 from app.models import (
     ChatStreamRequest,
     DocumentReadResponse,
@@ -178,7 +178,26 @@ async def chat_stream(
                     persist_error = None
                 except Exception:
                     pass
+        usage = service.usage_totals()
+        try:
+            await record_token_usage(
+                session,
+                user,
+                payload.conversation_id,
+                "chat" if payload.assistant_message_id else "auxiliary",
+                (usage or {}).get("prompt", 0),
+                (usage or {}).get("completion", 0),
+            )
+            await session.commit()
+        except Exception:
+            logging.getLogger("fatai.perf").exception("token usage recording failed")
         done_payload: dict[str, object] = {"persisted": persisted, "sources": sources}
+        if usage:
+            done_payload["usage"] = {
+                "prompt_tokens": usage["prompt"],
+                "completion_tokens": usage["completion"],
+                "total_tokens": usage["prompt"] + usage["completion"],
+            }
         if persist_error:
             done_payload["persist_error"] = persist_error
         yield f"event: done\ndata: {json.dumps(done_payload, ensure_ascii=False)}\n\n"
@@ -192,6 +211,44 @@ async def chat_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+async def record_token_usage(
+    session: AsyncSession,
+    user: User,
+    conversation_id: str | None,
+    source: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> None:
+    """Append one ledger entry for a server-made model call and fold it into conversation totals.
+
+    Conversation totals are server-authoritative: only this helper ever increments them, and
+    client sync payloads strip these fields (see apply_sync_payload), so totals can never be
+    overwritten from the client. The ledger row is kept even without a conversation id so the
+    audit trail matches the provider bill. Callers commit.
+    """
+    if not prompt_tokens and not completion_tokens:
+        return
+    session.add(
+        TokenUsageEntry(
+            user_id=user.id,
+            conversation_id=conversation_id,
+            source=source,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+    )
+    if conversation_id:
+        conversation = await session.get(Conversation, conversation_id)
+        if conversation is not None and conversation.user_id == user.id:
+            conversation.total_prompt_tokens += prompt_tokens
+            conversation.total_completion_tokens += completion_tokens
+            # A change carrying the NEW totals, so every device converges on server truth
+            # (persist_chat_turn's earlier change, if any, still holds the pre-turn totals).
+            await record_change(
+                session, user, "conversation", conversation_id, "UPSERT", entity_payload(conversation)
+            )
 
 
 async def persist_chat_turn(
@@ -314,10 +371,20 @@ async def generate_title_in_background(user_id: str, conversation_id: str) -> No
                 model=credentials.model,
                 extra_body={"thinking": {"type": "disabled"}},
             )
-            title = await generate_conversation_title(model, first_user_message.content)
+            title, usage_metadata = await generate_conversation_title(model, first_user_message.content)
             if not title:
                 return
             conversation.title = title
+            usage = usage_metadata or {}
+            await record_token_usage(
+                session,
+                user,
+                conversation_id,
+                "title",
+                int(usage.get("input_tokens") or 0),
+                int(usage.get("output_tokens") or 0),
+            )
+            # One change event carrying both the title and the updated totals.
             await record_change(session, user, "conversation", conversation_id, "UPSERT", entity_payload(conversation))
             await session.commit()
     except Exception:

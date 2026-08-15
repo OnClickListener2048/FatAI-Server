@@ -46,6 +46,21 @@ class Conversation(IdTimestampMixin, Base):
     model: Mapped[str] = mapped_column(String(256))
     is_pinned: Mapped[bool] = mapped_column(Boolean, default=False)
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Token totals are server-authoritative: only incremented here via record_token_usage,
+    # never overwritten by client sync payloads (see apply_sync_payload).
+    total_prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class TokenUsageEntry(IdTimestampMixin, Base):
+    """Append-only ledger of every model call the server made, for bill reconciliation."""
+
+    __tablename__ = "token_usage_entries"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    conversation_id: Mapped[str | None] = mapped_column(ForeignKey("conversations.id"), nullable=True, index=True)
+    source: Mapped[str] = mapped_column(String(16))  # 'chat' | 'auxiliary' | 'title'
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class ModelConfiguration(IdTimestampMixin, Base):
@@ -185,9 +200,28 @@ def _set_sqlite_pragma(dbapi_connection, _connection_record):
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
+# Additive columns back-filled on pre-existing databases (create_all never alters tables).
+_CONVERSATION_TOKEN_COLUMNS = (
+    ("total_prompt_tokens", "INTEGER NOT NULL DEFAULT 0"),
+    ("total_completion_tokens", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+
 async def initialize_database() -> None:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        await connection.run_sync(_ensure_conversation_token_columns)
+
+
+def _ensure_conversation_token_columns(sync_connection) -> None:
+    existing = {
+        row[1] for row in sync_connection.execute(sqlalchemy.text("PRAGMA table_info(conversations)"))
+    }
+    for column, ddl in _CONVERSATION_TOKEN_COLUMNS:
+        if column not in existing:
+            sync_connection.execute(
+                sqlalchemy.text(f"ALTER TABLE conversations ADD COLUMN {column} {ddl}")
+            )
 
 
 async def get_session():

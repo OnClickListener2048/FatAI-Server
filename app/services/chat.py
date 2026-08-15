@@ -108,6 +108,22 @@ class LangChainChatService:
     def __init__(self, credentials: UserModelCredentials, tools: ServerToolExecutor | None = None) -> None:
         self._credentials = credentials
         self._tools = tools
+        # Token usage accumulated across every provider call of the current turn (including
+        # tool rounds). None-y semantics: usage_totals() returns None when the provider never
+        # reported usage, which callers must distinguish from a genuinely zero-token turn.
+        self._usage: dict[str, int] = {"prompt": 0, "completion": 0}
+
+    def usage_totals(self) -> dict[str, int] | None:
+        totals = dict(self._usage)
+        if not totals["prompt"] and not totals["completion"]:
+            return None
+        return totals
+
+    @staticmethod
+    def _capture_usage(accumulated: dict[str, int], chunk) -> None:
+        metadata = getattr(chunk, "usage_metadata", None) or {}
+        accumulated["prompt"] += int(metadata.get("input_tokens") or 0)
+        accumulated["completion"] += int(metadata.get("output_tokens") or 0)
 
     def ensure_configured(self) -> None:
         if not self._credentials.api_key:
@@ -125,6 +141,7 @@ class LangChainChatService:
         non-thinking mode the LangChain tool loop is used.
         """
         self.ensure_configured()
+        self._usage = {"prompt": 0, "completion": 0}
         if request.thinking:
             async for content, tool_calls, reasoning in self._stream_direct(request, context):
                 yield content, tool_calls, reasoning
@@ -157,6 +174,7 @@ class LangChainChatService:
             buffered_chars = 0
             async for chunk in model.astream(messages):
                 combined_chunk = chunk if combined_chunk is None else combined_chunk + chunk
+                self._capture_usage(self._usage, chunk)
                 content = chunk.content
                 if isinstance(content, str) and content:
                     buffered_content.append(content)
@@ -237,6 +255,7 @@ class LangChainChatService:
 
         forced_started_at = time.perf_counter()
         async for chunk in model.astream(messages):
+            self._capture_usage(self._usage, chunk)
             content = chunk.content
             if isinstance(content, str) and content:
                 yield content, [], ""
@@ -369,6 +388,8 @@ class LangChainChatService:
             "stream": True,
             "temperature": request.temperature,
             "thinking": {"type": "enabled"},
+            # OpenAI/DeepSeek only include usage in the stream when explicitly requested.
+            "stream_options": {"include_usage": True},
         }
         if tool_definitions:
             body["tools"] = tool_definitions
@@ -397,8 +418,19 @@ class LangChainChatService:
                     if data == "[DONE]":
                         break
                     try:
-                        delta = json.loads(data)["choices"][0]["delta"]
-                    except (KeyError, IndexError, json.JSONDecodeError):
+                        payload = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    # The final chunk carries top-level usage instead of a delta; capture it
+                    # so the turn total survives for the done event.
+                    if "usage" in payload:
+                        usage = payload["usage"] or {}
+                        self._usage["prompt"] += int(usage.get("prompt_tokens") or 0)
+                        self._usage["completion"] += int(usage.get("completion_tokens") or 0)
+                        continue
+                    try:
+                        delta = payload["choices"][0]["delta"]
+                    except (KeyError, IndexError):
                         continue
                     yield dict(delta)
 

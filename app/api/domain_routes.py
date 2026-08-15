@@ -268,6 +268,11 @@ async def apply_sync_payload(
     values = dict(payload.payload)
     values.pop("id", None)
     values.pop("user_id", None)
+    if payload.entity_type == "conversation":
+        # Token totals are server-authoritative and only ever incremented by record_token_usage.
+        # Strip them from client payloads so a stale or malicious client cannot overwrite them.
+        values.pop("total_prompt_tokens", None)
+        values.pop("total_completion_tokens", None)
     if payload.entity_type == "model_configuration":
         api_key = str(values.pop("api_key", ""))
         if api_key:

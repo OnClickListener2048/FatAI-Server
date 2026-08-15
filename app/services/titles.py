@@ -14,14 +14,18 @@ _TITLE_PROMPT = SystemMessage(
 )
 
 
-async def generate_conversation_title(model, first_message: str) -> str:
-    """Asks the model for a short conversation title and cleans the raw reply."""
+async def generate_conversation_title(model, first_message: str) -> tuple[str, dict | None]:
+    """Asks the model for a short conversation title and cleans the raw reply.
+
+    Returns ``(title, usage_metadata)``; ``usage_metadata`` is the raw provider usage dict
+    (``input_tokens``/``output_tokens``) or ``None`` when the provider reported none.
+    """
     if not first_message.strip():
-        return ""
+        return "", None
     response = await model.ainvoke([_TITLE_PROMPT, HumanMessage(content=first_message)])
     content = response.content if isinstance(response.content, str) else ""
     title = content.strip().strip("\"'`“”‘’").strip()
     if not title:
-        return ""
+        return "", getattr(response, "usage_metadata", None)
     title = title.splitlines()[0].strip().rstrip("。.!！?？…")
-    return title[:MAX_TITLE_CHARACTERS]
+    return title[:MAX_TITLE_CHARACTERS], getattr(response, "usage_metadata", None)

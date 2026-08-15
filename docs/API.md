@@ -85,14 +85,23 @@ event: tool_call
 data: {"id":"call_1","name":"web_search","arguments":{"query":"iPhone 17 price"},"sources":[{"title":"Apple","url":"https://www.apple.com/iphone/"}]}
 
 event: done
-data: {"sources":[{"title":"Fact memory","kind":"memory","id":"mem-1"}]}
+data: {"sources":[{"title":"Fact memory","kind":"memory","id":"mem-1"}],"usage":{"prompt_tokens":1123,"completion_tokens":456,"total_tokens":1579}}
 ```
 
 `message` events are emitted incrementally, including when tool definitions are supplied.
 `tool_call` events carry the structured `sources` (title and URL) produced by server-side tool
 execution, deduplicated by URL across the whole request. The final `done` event carries
 `sources`, the RAG references injected into the context: `{title, kind, id}`, where `kind` is
-`memory` or `knowledge_document`; an empty array means no references were injected.
+`memory` or `knowledge_document`; an empty array means no references were injected. When the
+provider reported usage, `done` also carries `usage` (`prompt_tokens`, `completion_tokens`,
+`total_tokens`) summed across every model call of the turn, including tool rounds; it is
+omitted on provider error or mid-stream disconnect.
+
+Every server-made model call is recorded in the `token_usage_entries` ledger
+(`user_id`, optional `conversation_id`, `source` of `chat`/`auxiliary`/`title`, token counts)
+and folded into `conversations.total_prompt_tokens` / `total_completion_tokens`. These totals
+are server-authoritative: client sync payloads for conversations strip them, and the change
+stream carries the updated totals to every device.
 
 ## Workspaces, conversations, and messages
 
