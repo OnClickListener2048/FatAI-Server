@@ -55,6 +55,8 @@ A key shared dependency: `routes.py` imports `record_change` and `entity_payload
 
 2. **Thinking mode** (`thinking=True`): Bypasses LangChain entirely — `ChatOpenAI` discards `reasoning_content` from provider SSE. Instead, `_stream_direct` calls the provider's `/chat/completions` directly via httpx and yields both `reasoning` and `content` deltas. Tool execution still runs in a loop. The base URL defaults to `https://api.deepseek.com` when none is configured (DeepSeek is the primary thinking-mode provider).
 
+**Invoke-markup recovery**: deepseek-chat sometimes emits its official-app web-search invocation (`<invoke name="web_search"><parameter name="query">…</parameter></invoke>`) as plain text instead of structured `tool_calls`. Both streaming paths scan the full round content for that markup when no structured calls arrived (`_extract_invoke_calls` in `app/services/chat.py`) and execute it as a real tool call, restricted to the tool names actually bound this request. The markup is stripped from the assistant turn content.
+
 ### Tool execution
 
 `ServerToolExecutor` runs in the chat loop. Supported tools: `web_search`, `weather`. Each round's tool calls execute **concurrently** (`asyncio.gather`). Source URLs are deduplicated across all rounds. Tool output is capped at `MAX_TOOL_OUTPUT_CHARACTERS` (24,000).

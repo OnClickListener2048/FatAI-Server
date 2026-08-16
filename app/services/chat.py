@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 import asyncio
 import json
 import logging
+import re
 import time
 
 import httpx
@@ -21,6 +22,45 @@ MAX_TOOL_OUTPUT_CHARACTERS = 24_000
 MAX_TOOL_ROUNDS = 2
 # Trail of text held back per round so short tool-round narration can be dropped.
 NARRATION_BUFFER_CHARS = 200
+
+# deepseek-chat sometimes emits its official-app web-search invocation (<invoke name="...">
+# markup) as plain text instead of structured tool_calls. Recovery: parse the markup back
+# into a real tool call so the round executes search and continues normally.
+_INVOKE_PATTERN = re.compile(r'<invoke name="([A-Za-z0-9_]+)">(.*?)</invoke>', re.DOTALL)
+_INVOKE_PARAMETER_PATTERN = re.compile(r'<parameter name="([A-Za-z0-9_]+)">(.*?)</parameter>', re.DOTALL)
+
+
+def _unescape_xml(text: str) -> str:
+    return (
+        text.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", '"')
+        .replace("&#39;", "'")
+    )
+
+
+def _extract_invoke_calls(text: str, allowed_names: frozenset[str]) -> list[dict[str, object]]:
+    """Parses ``<invoke name="tool"><parameter name="k">v</parameter>...</invoke>`` blocks.
+
+    Only names in ``allowed_names`` are honored (the model must not be able to reach
+    anything the server does not back). Returns ``{id, name, args}`` dicts shaped like
+    the normalized streamed tool calls, or an empty list when nothing usable matched.
+    """
+    calls = []
+    for index, match in enumerate(_INVOKE_PATTERN.finditer(text)):
+        name = match.group(1)
+        if name not in allowed_names:
+            continue
+        arguments: dict[str, object] = {}
+        for parameter in _INVOKE_PARAMETER_PATTERN.finditer(match.group(2)):
+            arguments[parameter.group(1)] = _unescape_xml(parameter.group(2).strip())
+        calls.append({"id": f"invoke-{index}", "type": "function", "name": name, "args": arguments})
+    return calls
+
+
+def _strip_invoke_markup(text: str) -> str:
+    return _INVOKE_PATTERN.sub("", text).strip()
 
 
 @dataclass
@@ -157,6 +197,9 @@ class LangChainChatService:
         )
         messages = [self._to_langchain_message(message) for message in (context or request.messages)]
         tool_definitions = self._tools.bindable(request.tools) if self._tools else []
+        # Names actually bound this request — the invoke-markup recovery must never reach
+        # a tool the model was not shown.
+        bound_tool_names = {tool["function"]["name"] for tool in tool_definitions}
         if tool_definitions:
             model = model.bind_tools(tool_definitions)
 
@@ -187,6 +230,12 @@ class LangChainChatService:
                 return
             tool_calls = combined_chunk.tool_calls
             if not tool_calls:
+                # deepseek-chat sometimes emits its app-style <invoke name="..."> markup as
+                # plain text instead of structured tool_calls; recover it into a real call.
+                # Scan the FULL round content — the markup can straddle the narration buffer
+                # boundary, so the buffered tail alone would miss the closing tag.
+                tool_calls = _extract_invoke_calls(combined_chunk.content or "", bound_tool_names)
+            if not tool_calls:
                 for content in buffered_content:
                     yield content, [], ""
                 logger.info(
@@ -206,8 +255,13 @@ class LangChainChatService:
             )
             # AIMessageChunk has no to_message() in this langchain-core version; rebuild the
             # assistant turn from the normalized tool calls so the next round sees them.
+            # The invoke markup is stripped from the assistant content so the history stays
+            # clean for the provider.
             messages.append(
-                AIMessage(content=combined_chunk.content or "", tool_calls=combined_chunk.tool_calls)
+                AIMessage(
+                    content=_strip_invoke_markup(combined_chunk.content or ""),
+                    tool_calls=tool_calls,
+                )
             )
             outcomes: list[ToolOutcome] = []
 
@@ -287,6 +341,7 @@ class LangChainChatService:
         base_url = (self._credentials.base_url or "https://api.deepseek.com").rstrip("/")
         messages = [{"role": message.role, "content": message.content} for message in (context or request.messages)]
         tool_definitions = self._tools.bindable(request.tools) if self._tools else []
+        bound_tool_names = {tool["function"]["name"] for tool in tool_definitions}
         seen_source_urls: set[str] = set()
         stream_started_at = time.perf_counter()
         round_started_at = time.perf_counter()
@@ -313,6 +368,10 @@ class LangChainChatService:
                 return
             tool_calls = _normalized_tool_calls(combined_chunk.get("tool_calls") or [])
             if not tool_calls:
+                # Same invoke-markup recovery as the LangChain path (deepseek-chat emits its
+                # app-style <invoke name="..."> as text instead of structured tool_calls).
+                tool_calls = _extract_invoke_calls(combined_chunk.get("content") or "", bound_tool_names)
+            if not tool_calls:
                 for content in buffered_content:
                     yield content, [], ""
                 logger.info(
@@ -332,18 +391,16 @@ class LangChainChatService:
             )
             assistant_turn: dict[str, object] = {
                 "role": "assistant",
-                "content": "".join(buffered_content),
-            }
-            raw_calls = combined_chunk.get("tool_calls") or []
-            if raw_calls:
-                assistant_turn["tool_calls"] = [
+                "content": _strip_invoke_markup("".join(buffered_content)),
+                "tool_calls": [
                     {
                         "id": call["id"],
                         "type": "function",
                         "function": {"name": call["name"], "arguments": json.dumps(call["args"], ensure_ascii=False)},
                     }
                     for call in tool_calls
-                ]
+                ],
+            }
             messages.append(assistant_turn)
 
             async def execute_call(call: dict[str, object]) -> ToolOutcome:
