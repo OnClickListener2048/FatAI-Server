@@ -4,7 +4,7 @@ FatAI 的 FastAPI 后端，提供工具调用、流式 AI 对话、用户认证�
 
 ## 功能
 
-- 搜索、天气查询和文档转 Markdown 工具接口；文档解析通过 Docling 服务完成。
+- 服务端内置的 `web_search`/`weather` 工具调用，以及聊天流内附件转 Markdown（通过 Docling 服务完成）——工具定义与执行全部在服务端，客户端只发送文件引用。
 - 用户自带密钥（BYOK）的 OpenAI 兼容模型 Server-Sent Events（SSE）流式聊天，以及基于 LangGraph 的基础 Agent 运行入口。
 - JWT 用户认证，支持邮箱注册/登录和桌面端迁移期间的设备账号初始化。
 - 按用户隔离的工作区、会话、消息、记忆、提示词模板与应用设置同步。
@@ -39,7 +39,6 @@ uv run python main.py
 | `JWT_SECRET` / `JWT_EXPIRATION_MINUTES` | 访问令牌签名密钥与有效期；生产环境必须替换默认密钥。 |
 | `CORS_ORIGINS` | 允许的来源 JSON 数组，例如 `["http://localhost:3000"]`。 |
 | `UPLOAD_DIRECTORY` / `MAX_DOCUMENT_SIZE_BYTES` | 上传文件目录和大小上限（默认 50 MiB）。 |
-| `ALLOW_LOCAL_DOCUMENT_PATHS` | 仅为本地桌面端迁移保留 JSON `localPath` 读取；部署到远程环境前设为 `false`。 |
 | `EMBEDDING_BASE_URL` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` | 嵌入服务（OpenAI 兼容 `POST /embeddings`），默认本地 Ollama `http://127.0.0.1:11434/v1` + `bge-m3`（1024 维）。 |
 | `RAG_TOP_K_MEMORY` / `RAG_TOP_K_DOCUMENT` / `RAG_MIN_SCORE` | 检索召回数与向量路相似度阈值（默认 8 / 5 / 0.55；bge-m3 对表格行/数字给分偏高，0.45 会漏进无关命中）。 |
 | `RAG_CHUNK_CHARS` | 语义分块的最大块大小（默认 800 字符；目标块约为其 70%）。 |
@@ -79,7 +78,7 @@ curl.exe -X POST http://127.0.0.1:8080/v1/auth/register `
 | 分组           | 接口                                                                                                                                   |
 |----------------|----------------------------------------------------------------------------------------------------------------------------------------|
 | 认证           | `POST /v1/auth/register`、`/auth/login`、`/auth/device`；`GET /v1/users/me`                                                            |
-| 工具与即时对话 | `POST /v1/tools/search`、`/tools/weather`、`/tools/document-read`、`/chat/stream`                                                      |
+| 即时对话         | `POST /v1/chat/stream`（`web_search`/`weather` 工具与附件 Docling 转换全部在服务端完成）                                          |
 | 工作区和会话   | `GET`/`POST /v1/workspaces`、`PATCH /v1/workspaces/{id}`；`GET`/`POST /v1/conversations`；`GET`/`POST /v1/conversations/{id}/messages` |
 | 持久化对话     | `POST /v1/conversations/{id}/generate`：服务端组合提示词、记忆和已保存消息后，以 SSE 返回回复并保存助手消息。                          |
 | Agent          | `POST /v1/agents/run`：运行当前基础 LangGraph 模型节点。                                                                               |

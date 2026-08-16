@@ -48,16 +48,23 @@ metadata after this request succeeds.
 | `POST` | `/v1/agents/run` | Run the current user's basic agent graph. |
 
 `POST /v1/chat/stream` accepts `messages` (raw conversation turns, not pre-assembled), optional
-`model`, optional `model_configuration_id`, `temperature` (`0`–`2`), optional function `tools`,
-optional `workspace_id` and `conversation_id`, optional `response_language_tag` (default `en`),
-optional `tool_results` (string array of transient client-side tool output), optional
-`include_contextual_references` (default `true`), and optional `user_message_id` /
-`assistant_message_id` (the client-owned ids under which the turn is persisted).
+`model`, optional `model_configuration_id`, `temperature` (`0`–`2`), optional `documents` (an
+array of `{file_id, display_name, mime_type}` references to previously uploaded files — the
+bytes never leave the server), optional `workspace_id` and `conversation_id`, optional
+`response_language_tag` (default `en`), optional `include_contextual_references` (default
+`true`), and optional `user_message_id` / `assistant_message_id` (the client-owned ids under
+which the turn is persisted).
+
+Tools (`web_search`, `weather`) are defined and executed server-side (`CANONICAL_TOOLS` in
+`app/services/chat.py`); the client never sends tool definitions. Attachments in `documents`
+are converted to Markdown via Docling before the model stream starts and injected into the
+context as tool results.
 
 Context is assembled server-side (`app/services/context.py`): the core policy, enabled prompt
 templates, the workspace instruction, RAG-recalled memories and knowledge documents, and the
-history limit (last 20 turns) are layered in a fixed order; `tool_results` are appended after
-history. Clients therefore only send their own turns and never influence the instruction layers.
+history limit (last 20 turns) are layered in a fixed order; the attachment Markdown and tool
+results are appended after history. Clients therefore only send their own turns and never
+influence the instruction layers.
 
 RAG retrieval runs when the embedder and vector store are available (see
 `app/services/rag/`): the last user turn is embedded, the nearest memory chunks are recalled
@@ -88,9 +95,10 @@ event: done
 data: {"sources":[{"title":"Fact memory","kind":"memory","id":"mem-1"}],"usage":{"prompt_tokens":1123,"completion_tokens":456,"total_tokens":1579}}
 ```
 
-`message` events are emitted incrementally, including when tool definitions are supplied.
-`tool_call` events carry the structured `sources` (title and URL) produced by server-side tool
-execution, deduplicated by URL across the whole request. The final `done` event carries
+`message` events are emitted incrementally. `tool_call` events carry the structured `sources`
+(title and URL) produced by server-side tool execution, deduplicated by URL across the whole
+request; attachments produce one synthetic `tool_call` event each (title-only source) before
+the model stream starts. The final `done` event carries
 `sources`, the RAG references injected into the context: `{title, kind, id}`, where `kind` is
 `memory` or `knowledge_document`; an empty array means no references were injected. When the
 provider reported usage, `done` also carries `usage` (`prompt_tokens`, `completion_tokens`,
@@ -162,6 +170,3 @@ client cannot predict, so delete-wins keeps client-initiated deletes and regener
 | Method | Path | Authentication | Purpose |
 | --- | --- | --- | --- |
 | `GET` | `/health` | No | Service readiness check. |
-| `POST` | `/v1/tools/search` | No | Search with `query` and optional `max_results`. |
-| `POST` | `/v1/tools/weather` | No | Weather lookup with `location` and optional `max_results`. |
-| `POST` | `/v1/tools/document-read` | No | Read an uploaded document; local JSON paths are development-only. |

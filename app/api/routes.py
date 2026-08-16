@@ -5,28 +5,22 @@ import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from langchain_openai import ChatOpenAI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.db import Conversation, Message, SessionLocal, TokenUsageEntry, User, get_session
-from app.models import (
-    ChatStreamRequest,
-    DocumentReadResponse,
-    WeatherRequest,
-    WeatherResponse,
-    WebSearchRequest,
-    WebSearchResponse,
-)
+from app.db import Conversation, FileAsset, Message, SessionLocal, TokenUsageEntry, User, get_session
+from app.models import ChatStreamRequest, DocumentReference
 from app.api.domain_routes import entity_payload, record_change
-from app.services.chat import LangChainChatService, ServerToolExecutor
+from app.services.chat import LangChainChatService, ServerToolExecutor, bounded
 from app.services.context import assemble_context
 from app.services.documents import DoclingDocumentService
+from app.services.errors import ServiceError
 from app.services.model_configurations import get_user_model_credentials
-from app.services.search import BingRssSearchService, WeatherService
+from app.services.search import BingRssSearchService
 from app.services.titles import generate_conversation_title, transcript_for_title
 from app.security import get_current_user
 
@@ -50,56 +44,76 @@ def get_document_service(request: Request) -> DoclingDocumentService:
     return request.app.state.document_service
 
 
-@router.post("/tools/search", response_model=WebSearchResponse)
-async def search(
-    payload: WebSearchRequest,
-    service: BingRssSearchService = Depends(get_search_service),
-) -> WebSearchResponse:
-    query = payload.query.strip()
-    return WebSearchResponse(query=query, results=await service.search(query, payload.max_results))
+async def read_chat_documents(
+    session: AsyncSession,
+    user: User,
+    documents: list[DocumentReference],
+    document_service: DoclingDocumentService,
+) -> tuple[list[str], list[dict[str, object]]]:
+    """Converts chat attachments server-side before the model stream starts.
 
-
-@router.post("/tools/weather", response_model=WeatherResponse)
-async def weather(
-    payload: WeatherRequest,
-    search_service: BingRssSearchService = Depends(get_search_service),
-) -> WeatherResponse:
-    location = payload.location.strip()
-    service = WeatherService(search_service)
-    return WeatherResponse(location=location, results=await service.weather(location, payload.max_results))
-
-
-@router.post("/tools/document-read", response_model=DocumentReadResponse)
-async def document_read(request: Request, service: DoclingDocumentService = Depends(get_document_service)) -> DocumentReadResponse:
-    """Read a selected document.
-
-    Multipart uploads are the production interface. The legacy JSON `localPath` contract remains
-    available only for a co-located desktop client during the staged Kotlin-to-Python migration.
-    Disable it with `ALLOW_LOCAL_DOCUMENT_PATHS=false` before exposing this server remotely.
+    The client sends only file ids, so the bytes never leave the server. Returns the
+    tool-result strings injected into the assembled context and the synthetic tool_call
+    events that give the client's sources UI one chip per document. A missing or
+    unreadable file degrades to a formatted error string so the model still sees the
+    attachment was attempted.
     """
-    content_type = request.headers.get("content-type", "")
-    if content_type.startswith("application/json"):
-        if not get_settings().allow_local_document_paths:
-            raise HTTPException(410, "Local-path document reads are disabled; upload the file instead.")
-        payload = await request.json()
-        local_path = Path(str(payload.get("localPath", ""))).expanduser().resolve()
-        if not local_path.is_file():
-            raise HTTPException(400, "The selected file does not exist or is not a regular file.")
-        return await service.read(
-            display_name=str(payload.get("displayName", "")).strip() or local_path.name,
-            mime_type=str(payload.get("mimeType", "application/octet-stream")),
-            content=local_path.read_bytes(),
+    results: list[str] = []
+    calls: list[dict[str, object]] = []
+    for index, document in enumerate(documents):
+        asset = await session.scalar(
+            select(FileAsset).where(
+                FileAsset.id == document.file_id,
+                FileAsset.user_id == user.id,
+            )
         )
-
-    form = await request.form()
-    file = form.get("file")
-    if not isinstance(file, UploadFile) and not hasattr(file, "read"):
-        raise HTTPException(422, "multipart/form-data must include a file part.")
-    return await service.read(
-        display_name=file.filename or "document",
-        mime_type=file.content_type or "application/octet-stream",
-        content=await file.read(),
-    )
+        if asset is None:
+            results.append(
+                f"Tool: docling_document_read\n"
+                f"Tool failed (FILE_NOT_FOUND): {document.display_name} was not found."
+            )
+            continue
+        path = Path(asset.storage_path)
+        if not asset.storage_path or not path.is_file():
+            results.append(
+                f"Tool: docling_document_read\n"
+                f"Tool failed (FILE_UNAVAILABLE): {asset.display_name} is not available on the server."
+            )
+            continue
+        try:
+            converted = await document_service.read(
+                display_name=document.display_name,
+                mime_type=document.mime_type,
+                content=path.read_bytes(),
+            )
+        except ServiceError as error:
+            results.append(
+                f"Tool: docling_document_read\nTool failed ({error.code}): {error.message}"
+            )
+            continue
+        results.append(
+            "Tool: docling_document_read\n"
+            + bounded(
+                f"Document: {document.display_name}\n"
+                f"Extracted by Docling as Markdown:\n\n{converted.markdown}"
+            )
+        )
+        calls.append(
+            {
+                "id": f"docling-{index}",
+                "name": "docling_document_read",
+                "arguments": {
+                    "file_id": document.file_id,
+                    "display_name": document.display_name,
+                    "mime_type": document.mime_type,
+                },
+                # No url key on purpose: the client deduplicates source chips by
+                # `url ?: label`, so url="" would collapse every document into one
+                # chip while omitting it keeps one chip per file.
+                "sources": [{"title": document.display_name}],
+            }
+        )
+    return results, calls
 
 
 @router.post("/chat/stream")
@@ -117,6 +131,12 @@ async def chat_stream(
     )
     service.ensure_configured()
 
+    # Attachments are converted server-side before the context is assembled so the model
+    # sees their Markdown in the very first pass; the client sends only file ids.
+    document_results, document_calls = await read_chat_documents(
+        session, user, payload.documents, get_document_service(request)
+    )
+
     context_started_at = time.perf_counter()
     context, sources = await assemble_context(
         session,
@@ -125,7 +145,7 @@ async def chat_stream(
         payload.conversation_id,
         payload.messages,
         payload.response_language_tag,
-        payload.tool_results,
+        document_results,
         payload.include_contextual_references,
         retriever=getattr(request.app.state, "rag_retriever", None),
     )
@@ -142,6 +162,10 @@ async def chat_stream(
         persisted = False
         persist_error: str | None = None
         try:
+            # Surface the pre-stream document conversions as tool-call events so the
+            # client renders one source chip per attached file.
+            for document_call in document_calls:
+                yield f"event: tool_call\ndata: {json.dumps(document_call, ensure_ascii=False)}\n\n"
             async for content, tool_calls, reasoning in service.stream(payload, context=context):
                 answer += content
                 if reasoning:

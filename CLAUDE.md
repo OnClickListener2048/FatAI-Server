@@ -23,7 +23,7 @@ Open `http://127.0.0.1:8080/docs` for the interactive OpenAPI schema.
 
 The API is served by two routers mounted at `/v1` in `app/main.py`:
 
-- **`app/api/routes.py`** — Compatibility/tool endpoints (`/tools/search`, `/tools/weather`, `/tools/document-read`) and the main SSE chat endpoint (`/chat/stream`). These were the original routes and are largely self-contained.
+- **`app/api/routes.py`** — The main SSE chat endpoint (`/chat/stream`), including server-side attachment conversion (`read_chat_documents`), chat-turn persistence, and title generation.
 - **`app/api/domain_routes.py`** — Everything else: auth (`/auth/register`, `/auth/login`, `/auth/device`), CRUD for workspaces/conversations/messages/memories/prompts/files/settings, model configurations, agent run, sync protocol, and the server-assembled `/conversations/{id}/generate`.
 
 A key shared dependency: `routes.py` imports `record_change` and `entity_payload` from `domain_routes.py` so chat-turn persistence also writes to the sync change stream.
@@ -42,7 +42,9 @@ A key shared dependency: `routes.py` imports `record_change` and `entity_payload
 
 ### Tool execution
 
-`ServerToolExecutor` runs in the chat loop. Supported tools: `web_search`, `weather`. Each round's tool calls execute **concurrently** (`asyncio.gather`). Source URLs are deduplicated across all rounds. Tool output is capped at `MAX_TOOL_OUTPUT_CHARACTERS` (24,000).
+`ServerToolExecutor` runs in the chat loop with the **server-owned** schemas in `CANONICAL_TOOLS` (`app/services/chat.py`): `web_search`, `weather`. Clients never advertise tool definitions — the exact schema is a server concern, so changing a description or parameter takes effect without a client update. Each round's tool calls execute **concurrently** (`asyncio.gather`). Source URLs are deduplicated across all rounds. Tool output is capped at `MAX_TOOL_OUTPUT_CHARACTERS` (24,000).
+
+Chat attachments never touch the client after upload: `POST /v1/chat/stream` carries `documents` (file-id references only) and `read_chat_documents` (`routes.py`) runs Docling over the stored bytes before the model stream, injecting the Markdown as tool results and yielding synthetic `tool_call` events (one chip per file, no `url` key so the client dedup by label keeps them separate).
 
 ### SSE events
 
@@ -122,8 +124,7 @@ All domain models use `IdTimestampMixin` (UUID PK, created_at, updated_at). Data
 
 ## Key Design Decisions
 
-- **Chat tool execution is server-side only** — clients advertise tool definitions but never execute them. This keeps the tool loop simple and means the model always sees consistent tool output formatting.
+- **Chat tools are server-owned end to end** — the schemas (`CANONICAL_TOOLS`) and execution both live on the server; clients send only file references for attachments. This keeps the tool loop simple, means the model always sees consistent tool output formatting, and lets tool definitions change without a client update.
 - **Thinking mode uses raw httpx SSE, not LangChain** — because LangChain's `ChatOpenAI` drops `reasoning_content` chunks. The raw path manually parses SSE `data:` lines and merges streaming tool-call deltas by index.
 - **`JWT_SECRET` is dual-purpose** — it signs access tokens AND derives the Fernet key for API key encryption. This is a deliberate trade-off: no separate encryption key to manage, but rotation requires re-entering all provider keys.
 - **No Alembic** — schema changes require manual handling. The DB is auto-created at startup for development convenience.
-- **`ENABLE_CHAT_TOOLS` and `ENABLE_CHAT_PERSIST` toggles** — referenced in recent commits as passthrough testing controls; check current state in `app/api/routes.py` before assuming tools/persistence are active.

@@ -23,7 +23,6 @@ from app.models import (
     SyncOperationInput,
     SyncOperationResponse,
     SyncSnapshotResponse,
-    ToolDefinitionInput,
 )
 from app.db import (
     AppSetting,
@@ -153,7 +152,6 @@ class AgentRunInput(BaseModel):
     model: str | None = Field(default=None, max_length=256)
     system_prompt: str | None = Field(default=None, max_length=8192)
     temperature: float | None = Field(default=None, ge=0, le=2)
-    tools: list[ToolDefinitionInput] | None = Field(default=None)
     require_approval: bool = False
 
 
@@ -163,7 +161,6 @@ class AgentContinueInput(BaseModel):
     model: str | None = Field(default=None, max_length=256)
     system_prompt: str | None = Field(default=None, max_length=8192)
     temperature: float | None = Field(default=None, ge=0, le=2)
-    tools: list[ToolDefinitionInput] | None = Field(default=None)
     require_approval: bool = False
     approved_tool_ids: list[str] = Field(default_factory=list)
 
@@ -883,8 +880,7 @@ async def read_uploaded_document(
 ) -> DocumentReadResponse:
     """把已上传的文件资产转换为 Markdown(对象存储引用语义: 客户端只持 file_id)。
 
-    与 /v1/tools/document-read 的区别: 该端点要求鉴权并从服务端存储读取文件,
-    客户端无需再向服务端暴露本地路径。
+    该端点要求鉴权并从服务端存储读取文件, 客户端无需向服务端暴露本地路径。
     """
     asset = await owned_or_404(session, FileAsset, file_id, user.id)
     path = Path(asset.storage_path)

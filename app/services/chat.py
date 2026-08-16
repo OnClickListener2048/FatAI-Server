@@ -11,7 +11,7 @@ import httpx
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
-from app.models import ChatMessageInput, ChatStreamRequest, ToolDefinitionInput, WebSearchResult
+from app.models import ChatMessageInput, ChatStreamRequest, WebSearchResult
 from app.services.errors import ServiceError
 from app.services.model_configurations import UserModelCredentials
 from app.services.search import BingRssSearchService, WeatherService
@@ -71,22 +71,65 @@ class ToolOutcome:
     sources: list[dict[str, str]] = field(default_factory=list)
 
 
+# The only tools the chat loop may bind, in the provider's OpenAI function-call schema.
+# These are server-owned: the client never advertises tool definitions, so changing a
+# description or parameter here takes effect for every device without a client update.
+CANONICAL_TOOLS: list[dict[str, object]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Searches the public web for current information. Use the weather tool, "
+                "not this tool, for current weather or forecasts."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Focused web search query."},
+                    "max_results": {"type": "string", "description": "Number of results from 1 to 10; defaults to 5."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "weather",
+            "description": (
+                "Gets current weather and forecasts for a specified location. Use this "
+                "instead of web search for weather questions; ask for a location when it "
+                "is missing."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "City, region, or country to get weather for."},
+                    "max_results": {"type": "string", "description": "Number of weather sources from 1 to 5; defaults to 3."},
+                },
+                "required": ["location"],
+            },
+        },
+    },
+]
+
+
 class ServerToolExecutor:
     """Executes model-requested tools inside the chat stream.
 
     Tool execution lives on the server so one streaming call covers the full model-plus-tool
-    loop; the client only renders content and tool-call provenance. Only tools the server can
-    back are bound, so advertised-but-unavailable tools never reach the model.
+    loop; the client only renders content and tool-call provenance. The tool schemas are
+    server-owned ([CANONICAL_TOOLS]); the client never advertises definitions.
     """
-
-    SUPPORTED = frozenset({"web_search", "weather"})
 
     def __init__(self, search_service: BingRssSearchService) -> None:
         self._search_service = search_service
         self._weather_service = WeatherService(search_service)
 
-    def bindable(self, requested: list[ToolDefinitionInput]) -> list[dict[str, object]]:
-        return [to_openai_tool(tool) for tool in requested if tool.name in self.SUPPORTED]
+    def canonical(self) -> list[dict[str, object]]:
+        """Returns the server-owned tool schemas bound for every request (a copy)."""
+        return [dict(tool) for tool in CANONICAL_TOOLS]
 
     async def execute(self, name: str, arguments: dict[str, object]) -> ToolOutcome:
         try:
@@ -196,7 +239,7 @@ class LangChainChatService:
             extra_body={"thinking": {"type": "disabled"}},
         )
         messages = [self._to_langchain_message(message) for message in (context or request.messages)]
-        tool_definitions = self._tools.bindable(request.tools) if self._tools else []
+        tool_definitions = self._tools.canonical() if self._tools else []
         # Names actually bound this request — the invoke-markup recovery must never reach
         # a tool the model was not shown.
         bound_tool_names = {tool["function"]["name"] for tool in tool_definitions}
@@ -340,7 +383,7 @@ class LangChainChatService:
         """
         base_url = (self._credentials.base_url or "https://api.deepseek.com").rstrip("/")
         messages = [{"role": message.role, "content": message.content} for message in (context or request.messages)]
-        tool_definitions = self._tools.bindable(request.tools) if self._tools else []
+        tool_definitions = self._tools.canonical() if self._tools else []
         bound_tool_names = {tool["function"]["name"] for tool in tool_definitions}
         seen_source_urls: set[str] = set()
         stream_started_at = time.perf_counter()
@@ -531,26 +574,6 @@ def _normalized_tool_calls(raw_calls: list[dict[str, object]]) -> list[dict[str,
                 arguments = {}
         calls.append({"id": call.get("id"), "name": name, "args": arguments})
     return calls
-
-
-def to_openai_tool(tool: ToolDefinitionInput) -> dict[str, object]:
-    properties = {
-        parameter.name: {
-            "type": "string",
-            "description": parameter.description,
-            **({"enum": parameter.allowed_values} if parameter.allowed_values else {}),
-        }
-        for parameter in tool.parameters
-    }
-    required = [parameter.name for parameter in tool.parameters if parameter.required]
-    return {
-        "type": "function",
-        "function": {
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": {"type": "object", "properties": properties, "required": required},
-        },
-    }
 
 
 def to_provider_tool_call(call: dict[str, object], sources: list[dict[str, str]] | None = None) -> dict[str, object]:

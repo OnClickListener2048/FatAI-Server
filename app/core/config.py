@@ -25,7 +25,6 @@ class Settings(BaseSettings):
     jwt_secret: str = "change-this-development-secret-before-production"
     jwt_expiration_minutes: int = Field(default=60 * 24 * 7, gt=0)
     upload_directory: str = "data/uploads"
-    allow_local_document_paths: bool = True
 
     # RAG: OpenAI-compatible embedding endpoint (local Ollama by default, hosted BYOK for production)
     embedding_base_url: str = "http://127.0.0.1:11434/v1"

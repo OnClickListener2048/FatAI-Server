@@ -12,8 +12,8 @@ from fastapi.testclient import TestClient
 from app.core.config import get_settings
 from app.db import ModelConfiguration, SessionLocal, engine
 from app.main import create_app
-from app.models import ChatMessageInput, ChatStreamRequest, ToolDefinitionInput
-from app.services.chat import LangChainChatService
+from app.models import ChatMessageInput, ChatStreamRequest
+from app.services.chat import CANONICAL_TOOLS, LangChainChatService
 from app.services.model_configurations import UserModelCredentials, decrypt_api_key
 
 
@@ -100,27 +100,36 @@ class ModelConfigurationTest(unittest.TestCase):
                 return Chunk(self.content + other.content)
 
         class StreamingModel:
-            def bind_tools(self, _tools):
+            def __init__(self) -> None:
+                self.bound_tools = None
+
+            def bind_tools(self, tools):
+                self.bound_tools = tools
                 return self
 
             async def astream(self, _messages):
                 yield Chunk("stream")
                 yield Chunk("ed")
 
+        class Executor:
+            def canonical(self) -> list[dict[str, object]]:
+                return list(CANONICAL_TOOLS)
+
         model = StreamingModel()
-        request = ChatStreamRequest(
-            messages=[ChatMessageInput(role="user", content="Hello")],
-            tools=[ToolDefinitionInput(name="weather", description="Get weather")],
-        )
+        request = ChatStreamRequest(messages=[ChatMessageInput(role="user", content="Hello")])
 
         async def collect() -> list[tuple[str, list[dict[str, object]], str]]:
             service = LangChainChatService(
-                UserModelCredentials("test-key", "https://example.test/v1", "test-model")
+                UserModelCredentials("test-key", "https://example.test/v1", "test-model"),
+                Executor(),
             )
             with patch("app.services.chat.ChatOpenAI", return_value=model):
                 return [event async for event in service.stream(request)]
 
         self.assertEqual(asyncio.run(collect()), [("stream", [], ""), ("ed", [], "")])
+        # Tools are server-owned: the model is bound the canonical schemas with no client
+        # input in the request.
+        self.assertEqual(model.bound_tools, CANONICAL_TOOLS)
 
     def test_server_executes_tools_inside_stream(self) -> None:
         from langchain_core.messages import AIMessage, ToolMessage
@@ -157,18 +166,8 @@ class ModelConfigurationTest(unittest.TestCase):
             def __init__(self) -> None:
                 self.executed: list[tuple[str, dict]] = []
 
-            def bindable(self, requested):
-                return [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": {"type": "object", "properties": {}, "required": []},
-                        },
-                    }
-                    for tool in requested
-                ]
+            def canonical(self) -> list[dict[str, object]]:
+                return list(CANONICAL_TOOLS)
 
             async def execute(self, name: str, arguments: dict):
                 self.executed.append((name, arguments))
@@ -180,7 +179,6 @@ class ModelConfigurationTest(unittest.TestCase):
         executor = RecordingExecutor()
         request = ChatStreamRequest(
             messages=[ChatMessageInput(role="user", content="Hello")],
-            tools=[ToolDefinitionInput(name="web_search", description="Search")],
         )
 
         async def collect() -> list[tuple[str, list[dict[str, object]], str]]:

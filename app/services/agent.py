@@ -8,11 +8,10 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolM
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
-from app.models import ChatMessageInput, ToolDefinitionInput
+from app.models import ChatMessageInput
 from app.services.chat import (
     LangChainChatService,
     ServerToolExecutor,
-    to_openai_tool,
     to_provider_tool_call,
 )
 from app.services.errors import ServiceError
@@ -95,7 +94,6 @@ class LangGraphAgentService:
         model_name: str | None = None,
         system_prompt: str | None = None,
         temperature: float | None = None,
-        tool_definitions: list[ToolDefinitionInput] | None = None,
         require_approval: bool = False,
     ) -> AsyncIterator[dict[str, object]]:
         """Run the agent and yield SSE-style events.
@@ -122,9 +120,7 @@ class LangGraphAgentService:
         )
 
         model_name = model_name or self._credentials.model
-        bindable_tools = (
-            self._tools.bindable(tool_definitions or []) if self._tools else []
-        )
+        bindable_tools = self._tools.canonical() if self._tools else []
 
         stream_started_at = time.perf_counter()
 
