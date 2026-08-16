@@ -27,7 +27,6 @@ from app.services.context import assemble_context
 from app.services.documents import DoclingDocumentService
 from app.services.model_configurations import get_user_model_credentials
 from app.services.search import BingRssSearchService, WeatherService
-from app.services.local_needle import generate_title_local
 from app.services.titles import generate_conversation_title, transcript_for_title
 from app.security import get_current_user
 
@@ -341,12 +340,11 @@ async def persist_message(
 
 
 async def generate_title_in_background(user_id: str, conversation_id: str) -> None:
-    """Titles a conversation (local needle2 first, cloud fallback), then syncs it.
+    """Titles a conversation with the cloud model, then syncs it.
 
     Runs detached from the streaming request so the answer is never delayed. A title is only
     generated while the conversation still carries the default title; failures are swallowed
-    because the title is cosmetic. Needle2 titles cost no cloud tokens, so token usage is
-    recorded for cloud titles only.
+    because the title is cosmetic.
     """
     try:
         async with SessionLocal() as session:
@@ -366,22 +364,18 @@ async def generate_title_in_background(user_id: str, conversation_id: str) -> No
             first_user_message = next((message for message in messages if message.role == "user"), None)
             if first_user_message is None:
                 return
-            # Local needle2 first; a refusal (or a missing wheel) falls back to the cloud.
-            title = await asyncio.to_thread(generate_title_local, first_user_message.content)
-            usage_metadata = None
-            if not title:
-                credentials = await get_user_model_credentials(session, user_id, None, get_settings())
-                model = ChatOpenAI(
-                    api_key=credentials.api_key,
-                    base_url=credentials.base_url or None,
-                    model=credentials.model,
-                    extra_body={"thinking": {"type": "disabled"}},
-                )
-                # The cloud title summarizes the opening exchange (question + answer), not
-                # just the first message, so it reflects the conversation's actual topic.
-                title, usage_metadata = await generate_conversation_title(
-                    model, transcript_for_title([(m.role, m.content) for m in messages])
-                )
+            credentials = await get_user_model_credentials(session, user_id, None, get_settings())
+            model = ChatOpenAI(
+                api_key=credentials.api_key,
+                base_url=credentials.base_url or None,
+                model=credentials.model,
+                extra_body={"thinking": {"type": "disabled"}},
+            )
+            # The title summarizes the opening exchange (question + answer), not just the
+            # first message, so it reflects the conversation's actual topic.
+            title, usage_metadata = await generate_conversation_title(
+                model, transcript_for_title([(m.role, m.content) for m in messages])
+            )
             if not title:
                 return
             conversation.title = title

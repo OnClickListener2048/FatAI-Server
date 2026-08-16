@@ -8,23 +8,6 @@ FatAI Server is a FastAPI backend for a local, user-owned AI assistant. It provi
 
 Python 3.12+, managed with [uv](https://docs.astral.sh/uv/).
 
-### Local needle2 engine (Windows-only, pinned via uv sources)
-
-`app/services/local_needle.py` uses `cactus-needle` for on-device conversation titles.
-PyPI's `cactus-needle` (2.0.5+) ships only a universal wheel whose first run downloads the
-platform engine from `huggingface.co` (unreachable from this network). This repo therefore
-pins the verified `win_amd64` wheel in `wheels/` (engine + model embedded in
-`libneedle.dll`, no runtime download) via `[tool.uv.sources]`:
-
-```toml
-[tool.uv.sources]
-cactus-needle = { path = "wheels/cactus_needle-2.0.1-py3-none-win_amd64.whl" }
-```
-
-A plain `uv sync` installs from the pinned wheel; on non-Windows machines the install
-fails, which is fine — imports are lazy and `generate_title_local` returns `None` when
-`needle` is absent, so the server falls back to the cloud title path.
-
 ## Commands
 
 ```bash
@@ -125,7 +108,7 @@ When `POST /v1/chat/stream` includes `conversation_id` and `assistant_message_id
 2. Saves the user message and assistant answer as `Message` rows
 3. Writes both to the sync change stream via `record_change()`
 4. Wrapped in `asyncio.shield` in the finally block so a client disconnect still persists partial output
-5. After the stream, a detached background task titles the conversation (only if it still has the default title) and syncs it: the local needle2 engine (`app/services/local_needle.py`, Windows `cactus-needle` wheel with the engine+model embedded in `libneedle.dll`) goes first — it declares a single `set_title` tool and takes `function_calls[0].arguments.title`; a refusal or a missing wheel falls back to the cloud `generate_conversation_title` (`titles.py`), which summarizes the opening exchange (first 4 user/assistant turns, rendered by `transcript_for_title`) into a ≤20-character title rather than echoing the first message. Needle titles cost no cloud tokens, so `record_token_usage(..., "title", ...)` is only called for cloud titles
+5. After the stream, a detached background task titles the conversation (only if it still has the default title) and syncs it: `generate_title_in_background` (`routes.py`) asks the cloud `generate_conversation_title` (`titles.py`) to summarize the opening exchange (first 4 user/assistant turns, rendered by `transcript_for_title`) into a ≤20-character title rather than echoing the first message, then calls `record_token_usage(..., "title", ...)`
 
 This means the client no longer syncs chat messages — the server owns the persistence and the client receives updates through the change stream.
 

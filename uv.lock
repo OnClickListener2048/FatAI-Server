@@ -144,14 +144,6 @@ wheels = [
 ]
 
 [[package]]
-name = "cactus-needle"
-version = "2.0.1"
-source = { path = "wheels/cactus_needle-2.0.1-py3-none-win_amd64.whl" }
-wheels = [
-    { filename = "cactus_needle-2.0.1-py3-none-win_amd64.whl", hash = "sha256:6e99530c2c4e904fc5c04e0803d6c480a68bcf3d724efda26b890026820f8d58" },
-]
-
-[[package]]
 name = "certifi"
 version = "2026.7.22"
 source = { registry = "https://pypi.org/simple" }
@@ -417,7 +409,6 @@ dependencies = [
     { name = "aiosqlite" },
     { name = "asyncpg" },
     { name = "beautifulsoup4" },
-    { name = "cactus-needle" },
     { name = "cryptography" },
     { name = "email-validator" },
     { name = "fastapi" },
@@ -440,7 +431,6 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20,<1" },
     { name = "asyncpg", specifier = ">=0.29,<1" },
     { name = "beautifulsoup4", specifier = ">=4.12,<5" },
-    { name = "cactus-needle", path = "wheels/cactus_needle-2.0.1-py3-none-win_amd64.whl" },
     { name = "cryptography", specifier = ">=43,<46" },
     { name = "email-validator", specifier = ">=2.2,<3" },
     { name = "fastapi", specifier = ">=0.115,<1" },
