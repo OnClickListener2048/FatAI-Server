@@ -14,6 +14,16 @@ _TITLE_PROMPT = SystemMessage(
 )
 
 
+def clean_title(content: str) -> str:
+    """Turns a raw model reply into a title: strips quotes/markdown, keeps the first line,
+    drops trailing punctuation, and truncates to [MAX_TITLE_CHARACTERS]. Shared by the
+    cloud and the local needle2 path so both produce identical output shapes."""
+    text = content.strip().strip("\"'`“”‘’").strip()
+    if not text:
+        return ""
+    return text.splitlines()[0].strip().rstrip("。.!！?？…")[:MAX_TITLE_CHARACTERS]
+
+
 async def generate_conversation_title(model, first_message: str) -> tuple[str, dict | None]:
     """Asks the model for a short conversation title and cleans the raw reply.
 
@@ -24,8 +34,4 @@ async def generate_conversation_title(model, first_message: str) -> tuple[str, d
         return "", None
     response = await model.ainvoke([_TITLE_PROMPT, HumanMessage(content=first_message)])
     content = response.content if isinstance(response.content, str) else ""
-    title = content.strip().strip("\"'`“”‘’").strip()
-    if not title:
-        return "", getattr(response, "usage_metadata", None)
-    title = title.splitlines()[0].strip().rstrip("。.!！?？…")
-    return title[:MAX_TITLE_CHARACTERS], getattr(response, "usage_metadata", None)
+    return clean_title(content), getattr(response, "usage_metadata", None)

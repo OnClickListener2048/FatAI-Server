@@ -21,4 +21,11 @@ dependencies = [
     "uvicorn[standard]>=0.30,<1",
     "sqlite-vec>=0.1.9",
     "jieba>=0.42.1",
+    # cactus-needle on PyPI ships only a universal wheel that downloads the platform
+    # engine from huggingface.co at runtime (unreachable from this network), so the
+    # verified win_amd64 wheel with the embedded engine is pinned via [tool.uv.sources].
+    "cactus-needle",
 ]
+
+[tool.uv.sources]
+cactus-needle = { path = "wheels/cactus_needle-2.0.1-py3-none-win_amd64.whl" }

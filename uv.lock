@@ -3,7 +3,8 @@ revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14'",
-    "python_full_version < '3.14'",
+    "python_full_version == '3.13.*'",
+    "python_full_version < '3.13'",
 ]
 
 [[package]]
@@ -140,6 +141,14 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/43/65/318323f98dbee45d42dff61d8f047181bc6f2268a9068cfad035a46be5af/beautifulsoup4-4.15.0.tar.gz", hash = "sha256:288e3ca7d54b06f2ac191970bc275c1939cb46d450b255bf6718b04aa37ab4f7", size = 632571, upload-time = "2026-06-07T16:44:20.453Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/88/c6/92fcd42f1ba33e1184263f25bfabf3d27c383410470f169e4b8163bf9c17/beautifulsoup4-4.15.0-py3-none-any.whl", hash = "sha256:d6f88de62e1d4e38ecb1077eb9724cd0eff29d2a08ca16a401e9b9e93f117cf9", size = 109924, upload-time = "2026-06-07T16:44:21.566Z" },
+]
+
+[[package]]
+name = "cactus-needle"
+version = "2.0.1"
+source = { path = "wheels/cactus_needle-2.0.1-py3-none-win_amd64.whl" }
+wheels = [
+    { filename = "cactus_needle-2.0.1-py3-none-win_amd64.whl", hash = "sha256:6e99530c2c4e904fc5c04e0803d6c480a68bcf3d724efda26b890026820f8d58" },
 ]
 
 [[package]]
@@ -408,6 +417,7 @@ dependencies = [
     { name = "aiosqlite" },
     { name = "asyncpg" },
     { name = "beautifulsoup4" },
+    { name = "cactus-needle" },
     { name = "cryptography" },
     { name = "email-validator" },
     { name = "fastapi" },
@@ -430,6 +440,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20,<1" },
     { name = "asyncpg", specifier = ">=0.29,<1" },
     { name = "beautifulsoup4", specifier = ">=4.12,<5" },
+    { name = "cactus-needle", path = "wheels/cactus_needle-2.0.1-py3-none-win_amd64.whl" },
     { name = "cryptography", specifier = ">=43,<46" },
     { name = "email-validator", specifier = ">=2.2,<3" },
     { name = "fastapi", specifier = ">=0.115,<1" },

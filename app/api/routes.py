@@ -27,6 +27,7 @@ from app.services.context import assemble_context
 from app.services.documents import DoclingDocumentService
 from app.services.model_configurations import get_user_model_credentials
 from app.services.search import BingRssSearchService, WeatherService
+from app.services.local_needle import generate_title_local
 from app.services.titles import generate_conversation_title
 from app.security import get_current_user
 
@@ -340,11 +341,12 @@ async def persist_message(
 
 
 async def generate_title_in_background(user_id: str, conversation_id: str) -> None:
-    """Titles a conversation with a model call, then syncs it via the change stream.
+    """Titles a conversation (local needle2 first, cloud fallback), then syncs it.
 
     Runs detached from the streaming request so the answer is never delayed. A title is only
     generated while the conversation still carries the default title; failures are swallowed
-    because the title is cosmetic.
+    because the title is cosmetic. Needle2 titles cost no cloud tokens, so token usage is
+    recorded for cloud titles only.
     """
     try:
         async with SessionLocal() as session:
@@ -364,26 +366,30 @@ async def generate_title_in_background(user_id: str, conversation_id: str) -> No
             first_user_message = next((message for message in messages if message.role == "user"), None)
             if first_user_message is None:
                 return
-            credentials = await get_user_model_credentials(session, user_id, None, get_settings())
-            model = ChatOpenAI(
-                api_key=credentials.api_key,
-                base_url=credentials.base_url or None,
-                model=credentials.model,
-                extra_body={"thinking": {"type": "disabled"}},
-            )
-            title, usage_metadata = await generate_conversation_title(model, first_user_message.content)
+            # Local needle2 first; a refusal (or a missing wheel) falls back to the cloud.
+            title = await asyncio.to_thread(generate_title_local, first_user_message.content)
+            usage_metadata = None
+            if not title:
+                credentials = await get_user_model_credentials(session, user_id, None, get_settings())
+                model = ChatOpenAI(
+                    api_key=credentials.api_key,
+                    base_url=credentials.base_url or None,
+                    model=credentials.model,
+                    extra_body={"thinking": {"type": "disabled"}},
+                )
+                title, usage_metadata = await generate_conversation_title(model, first_user_message.content)
             if not title:
                 return
             conversation.title = title
-            usage = usage_metadata or {}
-            await record_token_usage(
-                session,
-                user,
-                conversation_id,
-                "title",
-                int(usage.get("input_tokens") or 0),
-                int(usage.get("output_tokens") or 0),
-            )
+            if usage_metadata is not None:
+                await record_token_usage(
+                    session,
+                    user,
+                    conversation_id,
+                    "title",
+                    int(usage_metadata.get("input_tokens") or 0),
+                    int(usage_metadata.get("output_tokens") or 0),
+                )
             # One change event carrying both the title and the updated totals.
             await record_change(session, user, "conversation", conversation_id, "UPSERT", entity_payload(conversation))
             await session.commit()
