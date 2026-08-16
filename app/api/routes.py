@@ -28,7 +28,7 @@ from app.services.documents import DoclingDocumentService
 from app.services.model_configurations import get_user_model_credentials
 from app.services.search import BingRssSearchService, WeatherService
 from app.services.local_needle import generate_title_local
-from app.services.titles import generate_conversation_title
+from app.services.titles import generate_conversation_title, transcript_for_title
 from app.security import get_current_user
 
 router = APIRouter(prefix="/v1")
@@ -377,7 +377,11 @@ async def generate_title_in_background(user_id: str, conversation_id: str) -> No
                     model=credentials.model,
                     extra_body={"thinking": {"type": "disabled"}},
                 )
-                title, usage_metadata = await generate_conversation_title(model, first_user_message.content)
+                # The cloud title summarizes the opening exchange (question + answer), not
+                # just the first message, so it reflects the conversation's actual topic.
+                title, usage_metadata = await generate_conversation_title(
+                    model, transcript_for_title([(m.role, m.content) for m in messages])
+                )
             if not title:
                 return
             conversation.title = title
