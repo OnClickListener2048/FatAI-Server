@@ -113,6 +113,8 @@ Three tables implement an offline-first sync in `app/db.py`:
 
 **Delete-wins**: DELETEs always apply regardless of sequence. This is necessary because chat messages saved server-side get server-assigned sequences the client cannot predict, so a client-initiated delete must still take effect.
 
+**Workspace id reclaim**: workspace ids are client-chosen constants (the default is literally `"inbox"`), so after a device identity change or DB restore the same id can still be owned by an orphaned user row. `apply_sync_payload` looks up by `(id, user_id)`, and when the row exists under another user it is adopted (reassigned to the current user) instead of crashing the INSERT on the global unique `workspaces.id` constraint. Only workspaces use fixed ids — every other entity type uses client-generated uuids, so cross-user collisions there are never reclaimed.
+
 `record_change()` (`domain_routes.py`) is the server-side hook for REST-originated writes to enter the change stream — it assigns a sequence and writes a `SyncChange` row. This ensures all devices converge whether mutations come from sync or REST.
 
 ## Chat Persistence Flow

@@ -279,6 +279,16 @@ async def apply_sync_payload(
             values["api_key_ciphertext"] = encrypt_api_key(api_key, get_settings())
         elif record is not None:
             values.pop("api_key_ciphertext", None)
+    if record is None and payload.entity_type == "workspace":
+        # Workspace ids are client-chosen constants (the default workspace is literally
+        # "inbox"), so after a device identity change or DB restore the same id can still
+        # be owned by an orphaned user row. The (id, user_id) lookup above missed it;
+        # reclaim it for the current user instead of failing the INSERT on the global
+        # unique id constraint. Only workspaces use fixed ids — every other entity type
+        # uses client-generated uuids, so cross-user collisions there are not reclaimed.
+        record = await session.scalar(select(model).where(model.id == payload.entity_id))
+        if record is not None:
+            record.user_id = user.id
     if record is None:
         session.add(model(id=payload.entity_id, user_id=user.id, **values))
     else:
